@@ -9,7 +9,7 @@ namespace Jellyfin.Plugin.A11yBookReader.Api;
 
 [ApiController]
 [Route("A11yBookReader")]
-[Authorize(Policy = "DefaultAuthorization")]
+[Authorize]
 public class BookReaderController : ControllerBase
 {
     private readonly EpubService _epub;
