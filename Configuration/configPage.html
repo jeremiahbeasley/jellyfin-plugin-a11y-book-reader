@@ -5,21 +5,26 @@
     <title>A11y Book Reader</title>
 </head>
 <body>
-    <div data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select">
+    <div data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
         <div data-role="content">
             <div class="content-primary">
                 <h2>A11y Book Reader</h2>
-                <p>Configuration coming soon.</p>
+                <p>Adds an accessible EPUB reader to Jellyfin book items.</p>
+                <ul>
+                    <li>Open any EPUB book from its detail page using the <strong>Read</strong> button.</li>
+                    <li>Navigate chapters with Prev / Next buttons, arrow keys, or TV remote.</li>
+                    <li>WCAG 2.2 A &amp; AA compliant — full keyboard and TV remote support.</li>
+                </ul>
+                <p style="color:color-mix(in srgb,currentColor 60%,transparent);font-size:0.9rem;">
+                    Requires the <strong>FileTransformation</strong> plugin for UI injection.
+                </p>
             </div>
         </div>
 
         <style>
-            /* styles go here */
+        ul { margin: 12px 0; padding-left: 24px; }
+        li { margin: 6px 0; }
         </style>
-
-        <script type="text/javascript">
-            // page logic goes here
-        </script>
     </div>
 </body>
 </html>

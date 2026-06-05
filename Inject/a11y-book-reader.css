@@ -1,0 +1,156 @@
+/* ─── Reader Overlay ─────────────────────────────────────────────────── */
+
+#abr-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    background: rgba(18, 18, 18, 0.98);
+    color: inherit;
+    font-family: inherit;
+}
+
+/* ─── Toolbar ────────────────────────────────────────────────────────── */
+
+#abr-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: rgba(0, 0, 0, 0.55);
+    border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+    flex-shrink: 0;
+}
+
+.abr-title-text {
+    flex: 1;
+    font-size: 1rem;
+    font-weight: 600;
+    color: inherit;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.abr-chapter-info {
+    font-size: 0.85rem;
+    color: color-mix(in srgb, currentColor 65%, transparent);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.abr-icon-btn {
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    min-width: 40px;
+    min-height: 40px; /* WCAG 2.5.8 target size */
+}
+
+.abr-icon-btn:hover {
+    background: rgba(127, 127, 127, 0.18);
+}
+
+/* ─── Content iframe ─────────────────────────────────────────────────── */
+
+#abr-content-area {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+}
+
+#abr-frame {
+    width: 100%;
+    height: 100%;
+    border: none;
+    background: #fff;
+}
+
+/* ─── Nav Bar ────────────────────────────────────────────────────────── */
+
+#abr-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: rgba(0, 0, 0, 0.55);
+    border-top: 1px solid rgba(127, 127, 127, 0.25);
+    flex-shrink: 0;
+    gap: 12px;
+}
+
+.abr-nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(127, 127, 127, 0.12);
+    border: 1px solid rgba(127, 127, 127, 0.28);
+    color: inherit;
+    cursor: pointer;
+    padding: 10px 18px;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    min-width: 44px;
+    min-height: 44px; /* WCAG 2.5.8 target size */
+    transition: background 0.15s;
+}
+
+.abr-nav-btn:hover:not([disabled]) {
+    background: rgba(127, 127, 127, 0.25);
+}
+
+.abr-nav-btn[disabled],
+.abr-nav-btn[aria-disabled="true"] {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.abr-chapter-label {
+    font-size: 0.9rem;
+    color: color-mix(in srgb, currentColor 70%, transparent);
+}
+
+/* ─── Read Button (injected into item detail page) ───────────────────── */
+
+.abr-read-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.abr-btn-icon {
+    font-size: 1.1rem;
+}
+
+/* ─── Focus Rings — WCAG 2.4.11 Focus Appearance ────────────────────── */
+/* Uses :focus (not :focus-visible) so TV programmatic focus triggers it */
+
+#abr-overlay button:focus,
+#abr-overlay iframe:focus,
+.abr-read-button:focus {
+    outline: 3px solid #00a4dc;
+    outline-offset: 2px;
+}
+
+/* show-focus class: Jellyfin TV mode focus indicator */
+#abr-overlay .show-focus:focus,
+.abr-read-button.show-focus:focus {
+    outline: 3px solid #00a4dc;
+    outline-offset: 2px;
+}
+
+/* Suppress default browser outline for mouse users only if :focus-visible is supported */
+@supports selector(:focus-visible) {
+    #abr-overlay button:focus:not(:focus-visible),
+    .abr-read-button:focus:not(:focus-visible) {
+        outline: none;
+    }
+}
