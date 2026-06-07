@@ -45,6 +45,15 @@ deliberate deviations here.
   schema exists for reader settings; ours is documented in
   `Models/ReaderSettings.cs` and clamped server-side.
 
+### Position resolution — term-occurrence locating (Phase 4)
+- A stored position/search-hit is relocated against live DOM by: full
+  text-quote within one block (fast path) → the Nth occurrence of the bare
+  search term across blocks (the term is short and never spans a block, so it
+  survives paragraph-boundary quotes). This is the practical realization of
+  the Readium text-quote locator and is the standard way to relocate when a
+  long quote straddles structural boundaries. Lesson: never require a
+  multi-block quote to match inside a single element.
+
 ## Planned (do NOT build private versions of these)
 
 ### Annotations (Phase 6) — W3C Web Annotation Data Model

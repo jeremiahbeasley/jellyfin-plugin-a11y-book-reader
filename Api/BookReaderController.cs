@@ -92,6 +92,17 @@ public class BookReaderController : ControllerBase
         return nav;
     }
 
+    // ── In-book search ────────────────────────────────────────────────────────
+
+    [HttpGet("search/{itemId}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<SearchResults> Search(Guid itemId, [FromQuery] string q)
+    {
+        if (string.IsNullOrWhiteSpace(q) || q.Trim().Length < 2)
+            return new SearchResults();
+        return _epub.Search(itemId, q);
+    }
+
     // ── Reading progress ──────────────────────────────────────────────────────
 
     [HttpGet("progress/{itemId}")]

@@ -17,6 +17,36 @@ public class NavNode
     public List<NavNode> Children { get; set; } = new();
 }
 
+/// <summary>One in-book search hit, carrying text-quote context (Locator-aligned).</summary>
+public class SearchHit
+{
+    public int Chapter { get; set; }
+
+    public string? ChapterTitle { get; set; }
+
+    public string Before { get; set; } = string.Empty;
+
+    public string Match { get; set; } = string.Empty;
+
+    public string After { get; set; } = string.Empty;
+
+    /// <summary>Quote used to relocate the hit on the client (match + trailing context).</summary>
+    public string Quote { get; set; } = string.Empty;
+
+    /// <summary>Occurrence ordinal of this Quote within the chapter (0-based) for disambiguation.</summary>
+    public int Ordinal { get; set; }
+}
+
+public class SearchResults
+{
+    public List<SearchHit> Hits { get; set; } = new();
+
+    public int Total { get; set; }
+
+    /// <summary>True when results were capped (more matches exist than returned).</summary>
+    public bool Capped { get; set; }
+}
+
 /// <summary>Parsed navigation for a publication (EPUB 3 nav doc, NCX fallback).</summary>
 public class BookNavigation
 {

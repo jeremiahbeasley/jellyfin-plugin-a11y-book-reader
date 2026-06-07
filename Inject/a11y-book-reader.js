@@ -9,6 +9,8 @@ if (typeof window.a11yBookReader === 'undefined') {
         _pendingScrollFraction: null,
         _pendingPara: null,
         _pendingQuote: null,
+        _pendingQuoteOrdinal: 0,
+        _pendingQuoteTerm: null,
         _ttsStartPara: null,   // restored Position: where Play resumes reading
         _ttsSaveTimer: null,   // 10s interval persisting the spoken position
         // Navigation (Phase 3 book map)
@@ -734,7 +736,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             // clobbered with 0). No text/Position anchor here: the OLD chapter
             // is still in the frame, so any quote grabbed now would be wrong.
             if (self._pendingScrollFraction === null && self._pendingPara === null &&
-                self._pendingAnchor === null) {
+                self._pendingAnchor === null && self._pendingQuote === null) {
                 self._saveProgress(self._chapterIndex, 0, null);
             }
             frame.src = src;
@@ -761,7 +763,7 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Unified turn: pages within the chapter first, chapters at the edges.
         _turn: function (delta) {
             // Deliberate navigation: Play now starts from where the user moved
-            this._ttsStartPara = null;
+            this._navResetTts();
             // Book edges: nothing past the last page of the last chapter,
             // nothing before the first page of the first one.
             var atLastChapter = this._chapterIndex >= this._spine.length - 1;
@@ -1100,6 +1102,14 @@ if (typeof window.a11yBookReader === 'undefined') {
                 this._closeReader(); return;
             }
             // p = play/pause TTS
+            // Text inputs own all their own keys (cursor, letters incl. "p").
+            // Must precede the p=play and arrow handlers below.
+            var ae = document.activeElement;
+            if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' ||
+                       ae.isContentEditable)) {
+                return;
+            }
+
             if (e.key === 'p' || e.key === 'P') { e.preventDefault(); this._toggleTts(); return; }
 
             // Reading keys while the book frame has focus: act on the content
@@ -2223,9 +2233,21 @@ if (typeof window.a11yBookReader === 'undefined') {
             };
         },
 
+        // Any deliberate navigation invalidates a paused/playing TTS session:
+        // the next Play must start fresh from the new location, not continue
+        // the old paused stream (which holds the pre-jump position).
+        _navResetTts: function () {
+            // Stop FIRST — _stopTts captures the spoken block into _ttsStartPara —
+            // then clear it, or the stale block (from the pre-jump chapter) would
+            // misplace the next Play into the new chapter's paragraphs.
+            if (this._ttsPlaying || this._ttsPaused) this._stopTts();
+            this._ttsStartPara = null;
+        },
+
         // Jump to chapter+anchor; remembers where you came from
         _goToTarget: function (chapter, anchor, pushBack) {
             if (typeof chapter !== 'number' || chapter < 0 || chapter >= this._spine.length) return;
+            this._navResetTts(); // Play now resumes from where you jump to
             if (pushBack) {
                 this._navStack.push(this._snapshotLocator());
                 this._updateBackBtn();
@@ -2239,6 +2261,7 @@ if (typeof window.a11yBookReader === 'undefined') {
         },
 
         _goToAnchor: function (anchor) {
+            this._navResetTts(); // Play resumes from the link target
             try {
                 var frame = document.getElementById('abr-frame');
                 var doc = frame.contentDocument;
@@ -2264,6 +2287,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             var loc = this._navStack.pop();
             this._updateBackBtn();
             if (!loc) return;
+            this._navResetTts(); // Play resumes from the returned position
             if (loc.chapter === this._chapterIndex) {
                 if (!this._goToPara(loc.para)) {
                     if (this._viewMode === 'paged') {
@@ -2323,7 +2347,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             tabs.className = 'abr-map-tabs';
             tabs.setAttribute('role', 'tablist');
             tabs.setAttribute('aria-label', 'Navigation sections');
-            var defs = [['toc', 'Contents'], ['pages', 'Pages'], ['landmarks', 'Landmarks'], ['goto', 'Go to']];
+            var defs = [['toc', 'Contents'], ['search', 'Search'], ['pages', 'Pages'], ['landmarks', 'Landmarks'], ['goto', 'Go to']];
             defs.forEach(function (t) {
                 var b = document.createElement('button');
                 b.type = 'button';
@@ -2428,6 +2452,8 @@ if (typeof window.a11yBookReader === 'undefined') {
             } else if (tab === 'landmarks') {
                 if (!self._nav.landmarks.length) body.textContent = 'This book has no landmarks.';
                 else renderTree(self._nav.landmarks, 0);
+            } else if (tab === 'search') {
+                self._renderSearchTab(body);
             } else {
                 // Go to: percent ("45%"), print page ("123"), or chapter ("c12")
                 var row = document.createElement('div');
@@ -2465,6 +2491,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                         var ch = Math.min(n - 1, Math.floor(total));
                         self._navStack.push(self._snapshotLocator());
                         self._updateBackBtn();
+                        self._navResetTts(); // Play resumes from the go-to target
                         self._pendingScrollFraction = total - ch;
                         self._loadChapter(ch);
                     } else if (/^c\d+$/i.test(v)) {
@@ -2499,6 +2526,153 @@ if (typeof window.a11yBookReader === 'undefined') {
                 body.appendChild(row);
                 body.appendChild(hint);
             }
+        },
+
+        // ── In-book search (Phase 4) ─────────────────────────────────────────
+
+        _renderSearchTab: function (body) {
+            var self = this;
+            var form = document.createElement('div');
+            form.className = 'abr-col-row';
+
+            var lab = document.createElement('label');
+            lab.setAttribute('for', 'abr-search-input');
+            lab.className = 'abr-col-label';
+            lab.textContent = 'Search this book';
+
+            var inp = document.createElement('input');
+            inp.id = 'abr-search-input';
+            inp.type = 'search';
+            inp.className = 'abr-goto-input';
+            inp.value = self._searchQuery || '';
+
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'abr-col-choice';
+            btn.textContent = 'Search';
+
+            form.appendChild(lab);
+            form.appendChild(inp);
+            form.appendChild(btn);
+            body.appendChild(form);
+
+            // Status (live) + results list
+            var status = document.createElement('p');
+            status.id = 'abr-search-status';
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            status.className = 'abr-col-label';
+            body.appendChild(status);
+
+            var list = document.createElement('div');
+            list.id = 'abr-search-results';
+            list.setAttribute('role', 'list');
+            list.setAttribute('aria-label', 'Search results');
+            body.appendChild(list);
+
+            function run() {
+                var q = (inp.value || '').trim();
+                self._searchQuery = q;
+                if (q.length < 2) { status.textContent = 'Type at least 2 characters.'; return; }
+                status.textContent = 'Searching…';
+                list.innerHTML = '';
+                // Race guard: only the newest search may render
+                var token = (self._searchToken || 0) + 1;
+                self._searchToken = token;
+                ApiClient.ajax({
+                    url: ApiClient.getUrl('A11yBookReader/search/' + self._currentItemId +
+                        '?q=' + encodeURIComponent(q)),
+                    type: 'GET', dataType: 'json'
+                }).then(function (res) {
+                    if (token !== self._searchToken) return; // a newer search supersedes
+                    var hits = res.Hits || res.hits || [];
+                    var total = res.Total != null ? res.Total : (res.total || hits.length);
+                    var capped = res.Capped || res.capped;
+                    if (!hits.length) {
+                        status.textContent = 'No matches for “' + q + '”.';
+                        list.setAttribute('aria-label', 'Search results, none');
+                        return;
+                    }
+                    var summary = total + (total === 1 ? ' match' : ' matches') +
+                        ' for “' + q + '”' + (capped ? ' (showing first ' + hits.length + ')' : '');
+                    status.textContent = summary;
+                    list.setAttribute('aria-label', summary);
+                    hits.forEach(function (h) {
+                        list.appendChild(self._searchResultItem(h));
+                    });
+                }).catch(function () {
+                    if (token !== self._searchToken) return;
+                    status.textContent = 'Search failed. Try again.';
+                });
+            }
+            btn.addEventListener('click', run);
+            inp.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') { e.preventDefault(); run(); }
+            });
+
+            // Re-render prior results when returning to the tab
+            if (self._searchQuery && self._searchQuery.length >= 2) {
+                setTimeout(run, 0);
+            }
+        },
+
+        _searchResultItem: function (h) {
+            var self = this;
+            var chapter = typeof h.Chapter === 'number' ? h.Chapter : h.chapter;
+            var title = h.ChapterTitle || h.chapterTitle || ('Section ' + (chapter + 1));
+            var before = h.Before || h.before || '';
+            var match = h.Match || h.match || '';
+            var after = h.After || h.after || '';
+            var quote = h.Quote || h.quote || match;
+            var ordinal = h.Ordinal != null ? h.Ordinal : (h.ordinal || 0);
+
+            var item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'abr-search-item';
+            item.setAttribute('role', 'listitem');
+
+            var loc = document.createElement('span');
+            loc.className = 'abr-search-loc';
+            loc.textContent = title;
+
+            var snip = document.createElement('span');
+            snip.className = 'abr-search-snip';
+            snip.appendChild(document.createTextNode(before));
+            var mk = document.createElement('mark');
+            mk.textContent = match;
+            snip.appendChild(mk);
+            snip.appendChild(document.createTextNode(after));
+
+            item.appendChild(loc);
+            item.appendChild(snip);
+            // Screen-reader label: location + readable snippet
+            item.setAttribute('aria-label', 'In ' + title + ': ' + before + match + after);
+
+            item.addEventListener('click', function () {
+                self._navStack.push(self._snapshotLocator());
+                self._updateBackBtn();
+                self._navResetTts(); // Play resumes from the search result
+                var term = self._searchQuery;
+                if (chapter === self._chapterIndex) {
+                    // Resolve immediately; do not arm pending state (would
+                    // leak the ordinal into the next cross-chapter jump)
+                    var idx = self._findByQuote(
+                        document.getElementById('abr-frame').contentDocument, quote, ordinal, term);
+                    if (idx !== null) self._goToPara(idx);
+                } else {
+                    self._pendingAnchor = null;
+                    self._pendingQuote = quote;
+                    self._pendingQuoteOrdinal = ordinal;
+                    self._pendingQuoteTerm = term;
+                    self._loadChapter(chapter);
+                }
+                self._toggleBookMap();
+                setTimeout(function () {
+                    var info = document.getElementById('abr-chapter-info');
+                    if (info) info.textContent = 'Jumped to match in ' + title;
+                }, 150);
+            });
+            return item;
         },
 
         // ── Footnote popover ─────────────────────────────────────────────────
@@ -2924,13 +3098,42 @@ if (typeof window.a11yBookReader === 'undefined') {
 
         // Resolve a text quote to a block index (TextQuoteSelector-style):
         // the standards fallback that survives edition and layout changes.
-        _findByQuote: function (doc, highlight) {
-            if (!highlight) return null;
+        // Locate the block (paragraph) for a hit. `highlight` is the full
+        // server quote; `term` is the bare search term. Case-insensitive.
+        _findByQuote: function (doc, highlight, ordinal, term) {
+            var want = ordinal || 0;
             try {
                 var blocks = this._getBlocks(doc);
-                for (var i = 0; i < blocks.length; i++) {
-                    var t = (blocks[i].textContent || '').replace(/\s+/g, ' ').trim();
-                    if (t.indexOf(highlight) !== -1) return i;
+                var texts = [];
+                for (var i = 0; i < blocks.length; i++)
+                    texts.push((blocks[i].textContent || '').replace(/\s+/g, ' ').toLowerCase());
+
+                // Pass 1 — full quote within a single block (unique → exact).
+                // Fails when the quote spans a paragraph boundary, which is why
+                // pass 2 exists.
+                if (highlight) {
+                    var hl = highlight.toLowerCase();
+                    for (var a = 0; a < texts.length; a++)
+                        if (texts[a].indexOf(hl) !== -1) return a;
+                }
+
+                // Pass 2 — the ordinal-th occurrence of the search term. The
+                // term is short, always inside one block, so this survives the
+                // boundary case. Uses the server's per-chapter occurrence index.
+                if (term) {
+                    var tm = term.toLowerCase();
+                    var seen = 0;
+                    for (var b = 0; b < texts.length; b++) {
+                        var pos = texts[b].indexOf(tm);
+                        while (pos !== -1) {
+                            if (seen === want) return b;
+                            seen++;
+                            pos = texts[b].indexOf(tm, pos + 1);
+                        }
+                    }
+                    // Ordinal overshot: first block containing the term
+                    for (var c = 0; c < texts.length; c++)
+                        if (texts[c].indexOf(tm) !== -1) return c;
                 }
             } catch (e) {}
             return null;
@@ -3016,6 +3219,19 @@ if (typeof window.a11yBookReader === 'undefined') {
                     if (anchor) self._goToAnchor(anchor);
                     else self._saveProgress(self._chapterIndex, 0, 0);
                 }
+                // Search-result jump: locate the quote (Nth occurrence) in the
+                // freshly loaded chapter
+                else if (self._pendingQuote !== null && self._pendingScrollFraction === null &&
+                         self._pendingPara === null) {
+                    var sq = self._pendingQuote;
+                    var so = self._pendingQuoteOrdinal || 0;
+                    var st = self._pendingQuoteTerm;
+                    self._pendingQuote = null;
+                    self._pendingQuoteTerm = null;
+                    var sidx = self._findByQuote(win.document, sq, so, st);
+                    if (sidx !== null) self._goToPara(sidx);
+                    else self._saveProgress(self._chapterIndex, 0, 0);
+                }
                 // Apply the resume locator held from _openReader, exactly once.
                 // Standards resolution order: structural Position → text quote
                 // (survives layout/edition changes) → progression fallback.
@@ -3049,8 +3265,11 @@ if (typeof window.a11yBookReader === 'undefined') {
                 }
                 // Debounced save while reading: 2s after scrolling stops
                 win.addEventListener('scroll', function () {
-                    // Manual scroll while TTS is idle = deliberate move
-                    if (!self._ttsPlaying && !self._ttsPaused) self._ttsStartPara = null;
+                    // Manual scroll is a deliberate move: idle clears the resume
+                    // hint; paused discards the stale paused stream so Play
+                    // restarts here. (Active playback auto-scrolls — leave it.)
+                    if (self._ttsPaused) self._navResetTts();
+                    else if (!self._ttsPlaying) self._ttsStartPara = null;
                     self._updateProgressUI();
                     if (self._scrollSaveTimer) clearTimeout(self._scrollSaveTimer);
                     self._scrollSaveTimer = setTimeout(function () {

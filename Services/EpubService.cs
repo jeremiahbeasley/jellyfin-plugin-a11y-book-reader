@@ -366,6 +366,80 @@ public class EpubService
         return toc;
     }
 
+    /// <summary>
+    /// Full-text search across the whole book. Returns Locator-aligned hits
+    /// (text-quote context) so the client relocates each via the same machinery
+    /// as positions and TOC jumps. Capped to keep responses bounded; the cap is
+    /// reported, never silent.
+    /// </summary>
+    public SearchResults Search(Guid itemId, string query, int cap = 200)
+    {
+        var results = new SearchResults();
+        var epub = GetParsed(itemId);
+        if (epub == null || string.IsNullOrWhiteSpace(query)) return results;
+
+        var needle = query.Trim();
+        using var zip = ZipFile.OpenRead(epub.FilePath);
+
+        foreach (var item in epub.Spine)
+        {
+            string text;
+            try
+            {
+                var entry = zip.GetEntry(item.ZipPath);
+                if (entry == null) continue;
+                string html;
+                using (var r = new StreamReader(entry.Open())) html = r.ReadToEnd();
+                // Strip scripts/styles then tags; collapse whitespace
+                html = Regex.Replace(html, @"<(script|style)[^>]*>.*?</\1>", " ",
+                    RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                text = Regex.Replace(html, "<[^>]+>", " ");
+                text = System.Net.WebUtility.HtmlDecode(text);
+                text = Regex.Replace(text, @"\s+", " ").Trim();
+                // Bound the per-chapter scan so a pathological file can't stall
+                // the request thread; 2M chars is far past any real chapter.
+                const int maxScan = 2_000_000;
+                if (text.Length > maxScan)
+                {
+                    _logger.LogWarning("Search truncated chapter {Path} at {Max} chars", item.ZipPath, maxScan);
+                    text = text[..maxScan];
+                }
+            }
+            catch { continue; }
+
+            int ordinal = 0;
+            int from = 0;
+            while (true)
+            {
+                int idx = text.IndexOf(needle, from, StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) break;
+                results.Total++;
+                if (results.Hits.Count < cap)
+                {
+                    int bStart = Math.Max(0, idx - 40);
+                    int aEnd = Math.Min(text.Length, idx + needle.Length + 60);
+                    var matchText = text.Substring(idx, needle.Length);
+                    var after = text[(idx + needle.Length)..aEnd];
+                    results.Hits.Add(new SearchHit
+                    {
+                        Chapter = item.Index,
+                        ChapterTitle = item.Title,
+                        Before = (bStart > 0 ? "…" : "") + text[bStart..idx],
+                        Match = matchText,
+                        After = after + (aEnd < text.Length ? "…" : ""),
+                        Quote = (matchText + after).Trim(),
+                        Ordinal = ordinal,
+                    });
+                }
+                ordinal++;
+                from = idx + needle.Length;
+            }
+        }
+
+        results.Capped = results.Total > results.Hits.Count;
+        return results;
+    }
+
     public string? GetChapterHtml(Guid itemId, int index, string serverUrl)
     {
         var epub = GetParsed(itemId);
