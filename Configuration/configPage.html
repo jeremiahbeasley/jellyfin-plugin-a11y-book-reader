@@ -5,26 +5,303 @@
     <title>A11y Book Reader</title>
 </head>
 <body>
-    <div data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
-        <div data-role="content">
-            <div class="content-primary">
-                <h2>A11y Book Reader</h2>
-                <p>Adds an accessible EPUB reader to Jellyfin book items.</p>
-                <ul>
-                    <li>Open any EPUB book from its detail page using the <strong>Read</strong> button.</li>
-                    <li>Navigate chapters with Prev / Next buttons, arrow keys, or TV remote.</li>
-                    <li>WCAG 2.2 A &amp; AA compliant — full keyboard and TV remote support.</li>
-                </ul>
-                <p style="color:color-mix(in srgb,currentColor 60%,transparent);font-size:0.9rem;">
-                    Requires the <strong>FileTransformation</strong> plugin for UI injection.
-                </p>
-            </div>
-        </div>
+<div data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button">
+    <div data-role="content">
+        <div class="content-primary">
+            <h2>A11y Book Reader</h2>
+            <p>Accessible EPUB reader with TTS for Jellyfin. WCAG 2.2 A &amp; AA compliant.</p>
 
-        <style>
-        ul { margin: 12px 0; padding-left: 24px; }
-        li { margin: 6px 0; }
-        </style>
+            <!-- ── Piper TTS ──────────────────────────────────────────── -->
+            <h3 style="margin-top:2rem">Piper TTS <span id="piper-badge" style="font-size:0.75rem;padding:2px 8px;border-radius:10px;background:rgba(127,127,127,.2);vertical-align:middle">Checking…</span></h3>
+            <p style="font-size:0.9rem;color:color-mix(in srgb,currentColor 80%,transparent)">
+                Piper runs locally on your server and produces natural-sounding speech.
+                Once installed, users choose Piper voices directly in the reader alongside
+                their browser's built-in voices — no API key needed.
+            </p>
+
+            <div id="piper-install-section" style="display:none;margin-bottom:1rem">
+                <button id="btn-install-piper" type="button" style="padding:8px 16px;border-radius:4px;border:1px solid rgba(0,164,220,.6);background:rgba(0,164,220,.15);color:inherit;font-size:0.9rem;cursor:pointer">
+                    Download &amp; Install Piper
+                </button>
+                <span id="piper-install-status" style="margin-left:12px;font-size:0.85rem"></span>
+            </div>
+
+            <!-- ── Voice catalog ──────────────────────────────────────── -->
+            <div id="piper-voices-section" style="display:none">
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:0.75rem">
+                    <h4 style="margin:0">Voice Library</h4>
+                    <label for="voice-filter" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0">Filter voices by language or name</label>
+                    <input id="voice-filter" type="search" placeholder="Filter by language or name…" aria-label="Filter voices by language or name"
+                           style="flex:1;max-width:280px;padding:5px 10px;border-radius:5px;border:1px solid rgba(127,127,127,.5);background:rgba(127,127,127,.08);color:inherit;font-size:0.85rem" />
+                    <button id="btn-refresh-catalog" type="button" style="font-size:0.82rem;padding:5px 12px;border-radius:4px;border:1px solid rgba(127,127,127,.35);background:rgba(127,127,127,.12);color:inherit;cursor:pointer">Refresh catalog</button>
+                </div>
+                <p id="catalog-load-msg" style="font-size:0.85rem;color:color-mix(in srgb,currentColor 80%,transparent)">Loading catalog…</p>
+                <div id="voice-table-wrap" style="overflow-x:auto;display:none">
+                    <table id="voice-table" style="width:100%;border-collapse:collapse;font-size:0.85rem">
+                        <thead>
+                            <tr style="text-align:left;border-bottom:1px solid rgba(127,127,127,.25)">
+                                <th class="sortable" data-col="name"        scope="col" tabindex="0" aria-sort="none" style="padding:6px 10px;cursor:pointer;user-select:none">Voice <span class="sort-icon" aria-hidden="true"></span></th>
+                                <th class="sortable" data-col="language"    scope="col" tabindex="0" aria-sort="ascending" style="padding:6px 10px;cursor:pointer;user-select:none">Language <span class="sort-icon" aria-hidden="true"></span></th>
+                                <th class="sortable" data-col="quality"     scope="col" tabindex="0" aria-sort="none" style="padding:6px 10px;cursor:pointer;user-select:none">Quality <span class="sort-icon" aria-hidden="true"></span></th>
+                                <th class="sortable" data-col="sizeBytes"   scope="col" tabindex="0" aria-sort="none" style="padding:6px 10px;cursor:pointer;user-select:none">Size <span class="sort-icon" aria-hidden="true"></span></th>
+                                <th scope="col" style="padding:6px 10px" aria-label="Actions"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="voice-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
     </div>
+
+    <style>
+    h3 { margin-bottom: 0.5rem; }
+    h4 { margin-bottom: 0.5rem; }
+    #voice-tbody tr:hover { background: rgba(127,127,127,.07); }
+    #voice-tbody td { padding: 6px 10px; border-bottom: 1px solid rgba(127,127,127,.12); }
+    .voice-dl-btn { font-size: 0.78rem; padding: 6px 10px; border-radius: 4px; cursor: pointer; min-height: 24px; }
+    .voice-dl-btn.downloaded { background: rgba(220,53,69,.12); color: #e05252; border: 1px solid rgba(220,53,69,.6); }
+    .voice-dl-btn.available  { background: rgba(0,164,220,.12); border: 1px solid rgba(0,164,220,.6); color: #00a4dc; }
+    .voice-dl-btn.busy          { opacity: .5; pointer-events: none; }
+    th.sortable:hover           { background: rgba(127,127,127,.08); }
+    th.sortable:focus           { outline: 2px solid #00a4dc; outline-offset: -2px; }
+    th.sortable.sort-asc .sort-icon::after  { content: ' ▲'; font-size: 0.7em; }
+    th.sortable.sort-desc .sort-icon::after { content: ' ▼'; font-size: 0.7em; }
+    .voice-sample-btn           { font-size: 0.78rem; padding: 6px 8px; border-radius: 4px; cursor: pointer; margin-right: 4px; background: rgba(127,127,127,.08); border: 1px solid rgba(127,127,127,.5); color: inherit; min-height: 24px; }
+    .voice-sample-btn.playing   { background: rgba(0,164,220,.12); color: #00a4dc; border-color: rgba(0,164,220,.6); }
+    .voice-sample-btn.loading   { opacity: .6; pointer-events: none; }
+    .voice-name-sub             { display: block; font-size: 0.75em; opacity: .75; margin-top: 1px; }
+    </style>
+
+    <script>
+    (function () {
+        var API = 'A11yBookReader';
+        var catalog = [];
+        var sortCol = 'language';
+        var sortDir = 'asc';
+        var sampleAudio = null;
+        var sampleKey = null;
+
+        function ajax(method, url, body) {
+            return ApiClient.ajax({
+                type: method,
+                url: ApiClient.getUrl(url),
+                data: body ? JSON.stringify(body) : undefined,
+                contentType: body ? 'application/json' : undefined,
+                dataType: 'json'
+            });
+        }
+
+        function fmt(bytes) {
+            if (!bytes) return '—';
+            return bytes >= 1048576 ? (bytes / 1048576).toFixed(0) + ' MB' : (bytes / 1024).toFixed(0) + ' KB';
+        }
+
+        function setBadge(installed) {
+            var b = document.getElementById('piper-badge');
+            b.textContent = installed ? '✓ Installed' : 'Not installed';
+            b.style.background = installed ? 'rgba(0,164,220,.15)' : 'rgba(127,127,127,.2)';
+            b.style.color = installed ? '#00a4dc' : 'inherit';
+        }
+
+        function loadStatus() {
+            ajax('GET', API + '/piper/status').then(function (s) {
+                setBadge(s.installed);
+                document.getElementById('piper-install-section').style.display = s.installed ? 'none' : 'block';
+                document.getElementById('piper-voices-section').style.display = s.installed ? 'block' : 'none';
+                if (s.installed) loadCatalog();
+            }).catch(function () { setBadge(false); });
+        }
+
+        function loadCatalog() {
+            document.getElementById('catalog-load-msg').style.display = 'block';
+            document.getElementById('voice-table-wrap').style.display = 'none';
+            ajax('GET', API + '/piper/catalog').then(function (voices) {
+                catalog = voices;
+                document.getElementById('catalog-load-msg').style.display = 'none';
+                document.getElementById('voice-table-wrap').style.display = 'block';
+                renderTable(voices);
+            }).catch(function (e) {
+                document.getElementById('catalog-load-msg').textContent = 'Failed to load catalog. Check your internet connection.';
+            });
+        }
+
+        function sortedVoices(voices) {
+            var col = sortCol;
+            var dir = sortDir === 'asc' ? 1 : -1;
+            return voices.slice().sort(function (a, b) {
+                var av = a[col], bv = b[col];
+                if (typeof av === 'number') return dir * (av - bv);
+                return dir * String(av || '').localeCompare(String(bv || ''));
+            });
+        }
+
+        function updateSortHeaders() {
+            document.querySelectorAll('th.sortable').forEach(function (th) {
+                th.classList.remove('sort-asc', 'sort-desc');
+                if (th.dataset.col === sortCol) {
+                    th.classList.add('sort-' + sortDir);
+                    th.setAttribute('aria-sort', sortDir === 'asc' ? 'ascending' : 'descending');
+                } else {
+                    th.setAttribute('aria-sort', 'none');
+                }
+            });
+        }
+
+        function renderTable(voices) {
+            var filter = (document.getElementById('voice-filter').value || '').toLowerCase();
+            var tbody = document.getElementById('voice-tbody');
+            tbody.innerHTML = '';
+            var shown = 0;
+            sortedVoices(voices).forEach(function (v) {
+                var matchText = (v.name || '') + ' ' + (v.language || '') + ' ' + (v.displayName || '');
+                if (filter && matchText.toLowerCase().indexOf(filter) === -1) return;
+                shown++;
+                var tr = document.createElement('tr');
+                var isPlaying = sampleKey === v.key;
+                var sampleBtn = v.sampleUrl
+                    ? '<button class="voice-sample-btn' + (isPlaying ? ' playing' : '') + '" data-action="sample" data-key="' + v.key + '">' + (isPlaying ? '■ Stop' : '▶ Sample') + '</button>'
+                    : '';
+                var dlBtn = v.downloaded
+                    ? '<button class="voice-dl-btn downloaded" data-action="delete" data-key="' + v.key + '">Delete</button>'
+                    : '<button class="voice-dl-btn available" data-action="download" data-key="' + v.key + '">Download</button>';
+                tr.innerHTML =
+                    '<td>' + escHtml(v.name || v.key) + '<span class="voice-name-sub">' + escHtml(v.key) + '</span></td>' +
+                    '<td>' + escHtml(v.language) + '</td>' +
+                    '<td>' + escHtml(v.quality) + '</td>' +
+                    '<td>' + fmt(v.sizeBytes) + '</td>' +
+                    '<td style="white-space:nowrap">' + sampleBtn + dlBtn + '</td>';
+                tbody.appendChild(tr);
+            });
+            if (shown === 0) {
+                var tr = document.createElement('tr');
+                tr.innerHTML = '<td colspan="5" style="text-align:center;padding:16px;opacity:.8">No voices match the filter</td>';
+                tbody.appendChild(tr);
+            }
+            updateSortHeaders();
+        }
+
+        function stopSample() {
+            if (sampleAudio) { sampleAudio.pause(); sampleAudio.src = ''; sampleAudio = null; }
+            sampleKey = null;
+        }
+
+        function playSample(voice, btn) {
+            stopSample();
+            if (!voice.sampleUrl) return;
+            sampleKey = voice.key;
+            var audio = new Audio(voice.sampleUrl);
+            sampleAudio = audio;
+            btn.textContent = '■ Stop';
+            btn.classList.add('playing');
+            audio.addEventListener('ended', function () {
+                if (sampleKey === voice.key) { sampleKey = null; sampleAudio = null; }
+                renderTable(catalog);
+            });
+            audio.addEventListener('error', function () {
+                btn.textContent = '▶ Sample';
+                btn.classList.remove('playing');
+                if (sampleKey === voice.key) { sampleKey = null; sampleAudio = null; }
+            });
+            audio.play().catch(function () {
+                btn.textContent = '▶ Sample';
+                btn.classList.remove('playing');
+                sampleKey = null; sampleAudio = null;
+            });
+        }
+
+        function escHtml(s) {
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        // Button delegation
+        document.getElementById('voice-tbody').addEventListener('click', function (e) {
+            var btn = e.target.closest('[data-action]');
+            if (!btn) return;
+            var key = btn.dataset.key;
+            var action = btn.dataset.action;
+
+            if (action === 'sample') {
+                if (sampleKey === key) {
+                    stopSample();
+                    renderTable(catalog);
+                } else {
+                    var voice = catalog.find(function (x) { return x.key === key; });
+                    if (voice) playSample(voice, btn);
+                }
+                return;
+            }
+
+            if (action === 'download') {
+                btn.textContent = 'Downloading…';
+                btn.classList.add('busy');
+                ajax('POST', API + '/piper/voice/' + encodeURIComponent(key) + '/download').then(function () {
+                    var v = catalog.find(function(x){ return x.key === key; });
+                    if (v) v.downloaded = true;
+                    renderTable(catalog);
+                }).catch(function () {
+                    btn.textContent = 'Failed — retry';
+                    btn.classList.remove('busy');
+                });
+            } else if (action === 'delete') {
+                if (sampleKey === key) stopSample();
+                btn.textContent = 'Deleting…';
+                btn.classList.add('busy');
+                ajax('DELETE', API + '/piper/voice/' + encodeURIComponent(key)).then(function () {
+                    var v = catalog.find(function(x){ return x.key === key; });
+                    if (v) v.downloaded = false;
+                    renderTable(catalog);
+                }).catch(function () {
+                    btn.textContent = 'Delete';
+                    btn.classList.remove('busy');
+                });
+            }
+        });
+
+        document.getElementById('btn-install-piper').addEventListener('click', function () {
+            var btn = this;
+            var status = document.getElementById('piper-install-status');
+            btn.disabled = true;
+            btn.textContent = 'Downloading Piper (~30 MB)…';
+            status.textContent = '';
+            ajax('POST', API + '/piper/install').then(function () {
+                btn.textContent = 'Installed!';
+                status.textContent = '✓ Piper is ready.';
+                loadStatus();
+            }).catch(function (e) {
+                btn.disabled = false;
+                btn.textContent = 'Download & Install Piper';
+                status.textContent = 'Install failed. Check server logs.';
+            });
+        });
+
+        document.getElementById('btn-refresh-catalog').addEventListener('click', loadCatalog);
+
+        document.querySelectorAll('th.sortable').forEach(function (th) {
+            function applySort() {
+                var col = th.dataset.col;
+                if (sortCol === col) {
+                    sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+                } else {
+                    sortCol = col;
+                    sortDir = col === 'sizeBytes' ? 'desc' : 'asc';
+                }
+                renderTable(catalog);
+            }
+            th.addEventListener('click', applySort);
+            th.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); applySort(); }
+            });
+        });
+
+        document.getElementById('voice-filter').addEventListener('input', function () {
+            renderTable(catalog);
+        });
+
+        loadStatus();
+    })();
+    </script>
+</div>
 </body>
 </html>

@@ -10,5 +10,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
         serviceCollection.AddSingleton<EpubService>();
+        serviceCollection.AddSingleton<PiperService>();
+        serviceCollection.AddSingleton<ProgressService>();
     }
 }

@@ -118,6 +118,96 @@
     color: color-mix(in srgb, currentColor 70%, transparent);
 }
 
+/* ─── TTS button states ──────────────────────────────────────────────── */
+
+@keyframes abr-pulse {
+    0%   { box-shadow: 0 0 0 0   rgba(0, 164, 220, 0.55); }
+    70%  { box-shadow: 0 0 0 7px rgba(0, 164, 220, 0);    }
+    100% { box-shadow: 0 0 0 0   rgba(0, 164, 220, 0);    }
+}
+
+#abr-tts-toggle.abr-tts-active {
+    background: rgba(0, 164, 220, 0.18);
+    color: #00a4dc;
+    animation: abr-pulse 1.6s ease-out infinite;
+}
+
+#abr-tts-toggle.abr-tts-active:hover {
+    background: rgba(0, 164, 220, 0.30);
+}
+
+#abr-tts-toggle.abr-tts-paused {
+    background: rgba(0, 164, 220, 0.09);
+    color: rgba(0, 164, 220, 0.65);
+}
+
+/* ─── TTS Settings panel ─────────────────────────────────────────────── */
+
+#abr-tts-settings {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 10px 20px;
+    background: rgba(0, 0, 0, 0.45);
+    border-bottom: 1px solid rgba(127, 127, 127, 0.18);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+#abr-tts-settings[hidden] {
+    display: none;
+}
+
+.abr-settings-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.abr-settings-label {
+    font-size: 0.82rem;
+    color: color-mix(in srgb, currentColor 65%, transparent);
+    white-space: nowrap;
+    user-select: none;
+}
+
+.abr-speed-select {
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(127, 127, 127, 0.3);
+    color: inherit;
+    border-radius: 5px;
+    padding: 5px 8px;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+
+.abr-speed-select:focus {
+    outline: 3px solid #00a4dc;
+    outline-offset: 2px;
+}
+
+.abr-voice-select {
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(127, 127, 127, 0.3);
+    color: inherit;
+    border-radius: 5px;
+    padding: 5px 8px;
+    font-size: 0.85rem;
+    max-width: 220px;
+    cursor: pointer;
+}
+
+.abr-voice-select:focus {
+    outline: 3px solid #00a4dc;
+    outline-offset: 2px;
+}
+
+.abr-voice-select option,
+.abr-speed-select option {
+    background: #1a1a1a;
+    color: #ffffff;
+}
+
 /* ─── Read Button (injected into item detail page) ───────────────────── */
 
 .abr-read-button {
@@ -128,6 +218,23 @@
 
 .abr-btn-icon {
     font-size: 1.1rem;
+}
+
+/* Loading spinner while spine is fetching — WCAG: decorative, aria-hidden */
+@keyframes abr-spin {
+    to { transform: rotate(360deg); }
+}
+
+.abr-btn-spinner {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: abr-spin 0.7s linear infinite;
+    vertical-align: middle;
+    flex-shrink: 0;
 }
 
 /* ─── Focus Rings — WCAG 2.4.11 Focus Appearance ────────────────────── */
