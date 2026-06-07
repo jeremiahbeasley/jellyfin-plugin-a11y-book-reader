@@ -54,7 +54,7 @@ public class BookReaderController : ControllerBase
     {
         var epub = _epub.GetParsed(itemId);
         if (epub == null) return NotFound();
-        return epub.Spine.Select(s => (object)new { s.Index, s.Title }).ToList();
+        return epub.Spine.Select(s => (object)new { s.Index, s.Title, Href = s.ZipPath }).ToList();
     }
 
     [HttpGet("chapter/{itemId}/{index}")]
@@ -83,22 +83,36 @@ public class BookReaderController : ControllerBase
     [HttpGet("progress/{itemId}")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public ActionResult<BookProgress> GetProgress(Guid itemId)
+    public ActionResult<Locator> GetProgress(Guid itemId)
     {
         var userId = GetUserId();
         if (userId == null) return Unauthorized();
-        var progress = _progress.Get(userId.Value, itemId);
-        if (progress == null) return NotFound();
-        return progress;
+        var locator = _progress.Get(userId.Value, itemId);
+        if (locator == null) return NotFound();
+        return locator;
     }
 
     [HttpPost("progress/{itemId}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    public ActionResult SaveProgress(Guid itemId, [FromBody] SaveProgressRequest request)
+    public ActionResult SaveProgress(Guid itemId, [FromBody] SaveLocatorRequest request)
     {
         var userId = GetUserId();
         if (userId == null) return Unauthorized();
-        _progress.Save(userId.Value, itemId, request.Chapter, request.Fraction);
+
+        // Locator shape from current clients; legacy flat fields from cached scripts
+        var locator = request.Locations != null
+            ? new Locator { Href = request.Href, Locations = request.Locations, Text = request.Text }
+            : new Locator
+            {
+                Locations = new LocatorLocations
+                {
+                    Chapter = request.Chapter ?? 0,
+                    Progression = request.Fraction ?? 0.0,
+                    Position = request.Para,
+                },
+            };
+
+        _progress.Save(userId.Value, itemId, locator);
         return NoContent();
     }
 

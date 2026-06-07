@@ -261,3 +261,137 @@
         outline: none;
     }
 }
+
+/* ─── Reading View (Phase 1) ─────────────────────────────────────────── */
+
+#abr-content-area {
+    position: relative; /* anchors ribbon, ruler, escape hatch */
+}
+
+/* Progress ribbon — the bookmark ribbon along the page edge */
+:root {
+    --abr-ribbon: #c89b5a;       /* lamplight amber — a ribbon, not a media control */
+    --abr-ribbon-track: rgba(127, 127, 127, 0.18);
+}
+
+#abr-ribbon {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 14px;
+    height: 100%;
+    padding: 0;
+    border: none;
+    border-left: 1px solid rgba(127, 127, 127, 0.2);
+    background: var(--abr-ribbon-track);
+    cursor: default;
+}
+
+#abr-ribbon-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 0%;
+    background: var(--abr-ribbon);
+    /* the ribbon's tail — a notched bookmark end */
+    clip-path: polygon(0 0, 100% 0, 100% 100%, 50% calc(100% - 7px), 0 100%);
+}
+
+/* Reading ruler — tinted band over the current reading line */
+#abr-ruler {
+    position: fixed;
+    left: 0;
+    right: 14px; /* stop at the ribbon */
+    height: 48px;
+    background: color-mix(in srgb, var(--abr-ribbon) 18%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--abr-ribbon) 45%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--abr-ribbon) 45%, transparent);
+    pointer-events: none;
+    z-index: 3;
+}
+
+#abr-ruler[hidden] { display: none; }
+
+/* Immersive mode — chrome slides away, the page remains.
+   visibility goes hidden AFTER the fade so hidden controls leave the
+   focus order entirely (keyboard/remote users can never land on them) */
+#abr-toolbar, #abr-nav {
+    transition: transform 0.25s ease-out, opacity 0.25s ease-out, visibility 0s linear 0s;
+}
+
+#abr-overlay.abr-immersive #abr-toolbar {
+    transform: translateY(-100%);
+    opacity: 0;
+    visibility: hidden;
+    transition: transform 0.25s ease-out, opacity 0.25s ease-out, visibility 0s linear 0.25s;
+    pointer-events: none;
+    position: absolute;
+    width: 100%;
+}
+
+#abr-overlay.abr-immersive #abr-nav {
+    transform: translateY(100%);
+    opacity: 0;
+    visibility: hidden;
+    transition: transform 0.25s ease-out, opacity 0.25s ease-out, visibility 0s linear 0.25s;
+    pointer-events: none;
+    position: absolute;
+    bottom: 0;
+    width: 100%;
+}
+
+#abr-overlay.abr-immersive #abr-tts-settings {
+    display: none;
+}
+
+/* The obvious way back — faded but always findable, loud on focus */
+#abr-show-controls {
+    position: absolute;
+    top: 10px;
+    right: 24px;
+    z-index: 4;
+    min-width: 44px;
+    min-height: 44px;
+    /* Solid surface + strong border: holds 3:1 (WCAG 1.4.11) over any page,
+       quiet at rest via reduced inner contrast rather than transparency */
+    border: 2px solid rgba(255, 255, 255, 0.62);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.72);
+    color: rgba(255, 255, 255, 0.85);
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s;
+}
+
+#abr-show-controls:hover,
+#abr-show-controls:focus {
+    border-color: #ffffff;
+    color: #ffffff;
+}
+
+#abr-show-controls[hidden] { display: none; }
+
+/* Pressed-state for the toolbar toggles */
+#abr-mode-toggle[aria-pressed="true"],
+#abr-ruler-toggle[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--abr-ribbon) 22%, transparent);
+    color: var(--abr-ribbon);
+}
+
+.abr-nav-mid {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+}
+
+/* Reduced motion: kill every reader animation */
+@media (prefers-reduced-motion: reduce) {
+    #abr-toolbar, #abr-nav, #abr-show-controls {
+        transition: none;
+    }
+    #abr-tts-toggle.abr-tts-active {
+        animation: none;
+    }
+}

@@ -6,9 +6,11 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.A11yBookReader.Services;
 
 /// <summary>
-/// Stores per-user, per-book reading positions as JSON under the server data path.
-/// All access is serialized through a lock; writes are atomic (temp file + rename)
-/// so a crash mid-write can never corrupt existing progress.
+/// Stores per-user, per-book reading positions as Readium-style locators in
+/// JSON under the server data path. All access is serialized through a lock;
+/// writes are atomic (temp file + rename) so a crash mid-write can never
+/// corrupt existing progress. Legacy flat-shape saves (v1.0.0.10/11) are
+/// migrated on load.
 /// </summary>
 public class ProgressService
 {
@@ -16,8 +18,8 @@ public class ProgressService
     private readonly ILogger<ProgressService> _logger;
     private readonly object _lock = new();
 
-    // userId -> (itemId -> progress)
-    private Dictionary<string, Dictionary<string, BookProgress>> _data = new();
+    // userId -> (itemId -> locator)
+    private Dictionary<string, Dictionary<string, Locator>> _data = new();
 
     public ProgressService(IApplicationPaths appPaths, ILogger<ProgressService> logger)
     {
@@ -28,7 +30,7 @@ public class ProgressService
         Load();
     }
 
-    public BookProgress? Get(Guid userId, Guid itemId)
+    public Locator? Get(Guid userId, Guid itemId)
     {
         lock (_lock)
         {
@@ -39,24 +41,24 @@ public class ProgressService
         }
     }
 
-    public void Save(Guid userId, Guid itemId, int chapter, double fraction)
+    public void Save(Guid userId, Guid itemId, Locator locator)
     {
         lock (_lock)
         {
             var userKey = userId.ToString("N");
             if (!_data.TryGetValue(userKey, out var books))
             {
-                books = new Dictionary<string, BookProgress>();
+                books = new Dictionary<string, Locator>();
                 _data[userKey] = books;
             }
 
-            books[itemId.ToString("N")] = new BookProgress
-            {
-                Chapter = Math.Max(0, chapter),
-                Fraction = Math.Clamp(fraction, 0.0, 1.0),
-                Updated = DateTime.UtcNow
-            };
+            locator.Locations.Chapter = Math.Max(0, locator.Locations.Chapter);
+            locator.Locations.Progression = Math.Clamp(locator.Locations.Progression, 0.0, 1.0);
+            locator.Locations.TotalProgression = Math.Clamp(locator.Locations.TotalProgression, 0.0, 1.0);
+            if (locator.Locations.Position is < 0) locator.Locations.Position = null;
+            locator.Updated = DateTime.UtcNow;
 
+            books[itemId.ToString("N")] = locator;
             Persist();
         }
     }
@@ -67,14 +69,52 @@ public class ProgressService
         {
             if (!File.Exists(_filePath)) return;
             var json = File.ReadAllText(_filePath);
-            var data = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, BookProgress>>>(json);
-            if (data != null) _data = data;
+            var raw = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, JsonElement>>>(json);
+            if (raw == null) return;
+
+            foreach (var (userKey, books) in raw)
+            {
+                var converted = new Dictionary<string, Locator>();
+                foreach (var (itemKey, el) in books)
+                {
+                    var locator = el.TryGetProperty("Locations", out _)
+                        ? el.Deserialize<Locator>()
+                        : MigrateLegacy(el);
+                    if (locator != null) converted[itemKey] = locator;
+                }
+                _data[userKey] = converted;
+            }
         }
         catch (Exception ex)
         {
             // Unreadable file: keep an in-memory store rather than failing the plugin.
             _logger.LogError(ex, "Failed to load reading progress from {Path}", _filePath);
         }
+    }
+
+    /// <summary>v1.0.0.10/11 flat shape → locator.</summary>
+    private static Locator? MigrateLegacy(JsonElement el)
+    {
+        try
+        {
+            var chapter = el.TryGetProperty("Chapter", out var c) ? c.GetInt32() : 0;
+            var fraction = el.TryGetProperty("Fraction", out var f) ? f.GetDouble() : 0.0;
+            int? para = el.TryGetProperty("Para", out var p) && p.ValueKind == JsonValueKind.Number
+                ? p.GetInt32() : null;
+            var updated = el.TryGetProperty("Updated", out var u) && u.ValueKind == JsonValueKind.String
+                ? u.GetDateTime() : DateTime.UtcNow;
+            return new Locator
+            {
+                Locations = new LocatorLocations
+                {
+                    Chapter = chapter,
+                    Progression = fraction,
+                    Position = para,
+                },
+                Updated = updated,
+            };
+        }
+        catch { return null; }
     }
 
     private void Persist()
