@@ -80,6 +80,18 @@ public class BookReaderController : ControllerBase
         return File(data, contentType);
     }
 
+    // ── Navigation (TOC / landmarks / page list) ──────────────────────────────
+
+    [HttpGet("nav/{itemId}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<BookNavigation> GetNavigation(Guid itemId)
+    {
+        var nav = _epub.GetNavigation(itemId);
+        if (nav == null) return NotFound();
+        return nav;
+    }
+
     // ── Reading progress ──────────────────────────────────────────────────────
 
     [HttpGet("progress/{itemId}")]

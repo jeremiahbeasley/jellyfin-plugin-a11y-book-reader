@@ -146,6 +146,226 @@ public class EpubService
         };
     }
 
+    private readonly ConcurrentDictionary<Guid, BookNavigation> _navCache = new();
+
+    /// <summary>
+    /// Navigation per the EPUB 3 Navigation Document (nav.xhtml: toc,
+    /// landmarks, page-list), with NCX navMap/pageList as the fallback.
+    /// </summary>
+    public BookNavigation? GetNavigation(Guid itemId)
+    {
+        var epub = GetParsed(itemId);
+        if (epub == null) return null;
+        return _navCache.GetOrAdd(itemId, _ =>
+        {
+            try { return ParseNavigation(epub); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Navigation parsing failed for {Id}", itemId);
+                return new BookNavigation();
+            }
+        });
+    }
+
+    private BookNavigation ParseNavigation(ParsedEpub epub)
+    {
+        var nav = new BookNavigation();
+        using var zip = ZipFile.OpenRead(epub.FilePath);
+
+        // Spine lookup: zip path -> index
+        var spineByPath = epub.Spine.ToDictionary(s => s.ZipPath, s => s.Index);
+
+        // EPUB 3 nav document: manifest item with properties containing "nav".
+        // Properties live in the OPF, which Manifest doesn't retain — re-read it.
+        string? navHref = null;
+        var containerEntry = zip.GetEntry("META-INF/container.xml");
+        if (containerEntry != null)
+        {
+            string opfPath;
+            using (var s = containerEntry.Open())
+            {
+                opfPath = XDocument.Load(s).Descendants()
+                    .First(e => e.Name.LocalName == "rootfile")
+                    .Attribute("full-path")!.Value;
+            }
+            var opfEntry = zip.GetEntry(opfPath);
+            if (opfEntry != null)
+            {
+                using var s = opfEntry.Open();
+                navHref = XDocument.Load(s).Descendants()
+                    .Where(e => e.Name.LocalName == "item" &&
+                                (e.Attribute("properties")?.Value ?? string.Empty)
+                                .Split(' ').Contains("nav"))
+                    .Select(e => e.Attribute("href")?.Value)
+                    .FirstOrDefault();
+            }
+        }
+
+        NavNode? Resolve(string? src, string baseDir, string title, string? epubType)
+        {
+            if (string.IsNullOrWhiteSpace(src)) return null;
+            var anchor = src.Contains('#') ? src[(src.IndexOf('#') + 1)..] : null;
+            var file = src.Contains('#') ? src[..src.IndexOf('#')] : src;
+            var zipPath = NormalizePath(baseDir + Uri.UnescapeDataString(file));
+            return new NavNode
+            {
+                Title = title.Trim(),
+                Chapter = spineByPath.TryGetValue(zipPath, out var idx) ? idx : -1,
+                Anchor = string.IsNullOrEmpty(anchor) ? null : anchor,
+                EpubType = epubType,
+            };
+        }
+
+        if (navHref != null)
+        {
+            var navZipPath = NormalizePath(epub.OpfBaseDir + navHref);
+            var navDir = navZipPath.Contains('/')
+                ? navZipPath[..(navZipPath.LastIndexOf('/') + 1)] : string.Empty;
+            var navEntry = zip.GetEntry(navZipPath);
+            if (navEntry != null)
+            {
+                XDocument doc;
+                using (var s = navEntry.Open()) doc = XDocument.Load(s);
+                XNamespace epubNs = "http://www.idpf.org/2007/ops";
+
+                List<NavNode> WalkList(XElement? ol)
+                {
+                    var nodes = new List<NavNode>();
+                    if (ol == null) return nodes;
+                    foreach (var li in ol.Elements().Where(e => e.Name.LocalName == "li"))
+                    {
+                        var a = li.Elements().FirstOrDefault(e => e.Name.LocalName == "a");
+                        var span = li.Elements().FirstOrDefault(e => e.Name.LocalName == "span");
+                        var label = (a ?? span)?.Value ?? string.Empty;
+                        var node = Resolve(a?.Attribute("href")?.Value, navDir, label,
+                                       a?.Attribute(epubNs + "type")?.Value)
+                                   ?? new NavNode { Title = label.Trim() };
+                        var childOl = li.Elements().FirstOrDefault(e => e.Name.LocalName == "ol");
+                        node.Children = WalkList(childOl);
+                        if (!string.IsNullOrWhiteSpace(node.Title) || node.Children.Count > 0)
+                            nodes.Add(node);
+                    }
+                    return nodes;
+                }
+
+                foreach (var navEl in doc.Descendants().Where(e => e.Name.LocalName == "nav"))
+                {
+                    var type = navEl.Attribute(epubNs + "type")?.Value ?? string.Empty;
+                    var ol = navEl.Elements().FirstOrDefault(e => e.Name.LocalName == "ol");
+                    if (type.Contains("toc")) nav.Toc = WalkList(ol);
+                    else if (type.Contains("landmarks")) nav.Landmarks = WalkList(ol)
+                        .Select(n => { n.EpubType ??= null; return n; }).ToList();
+                    else if (type.Contains("page-list")) nav.PageList = WalkList(ol);
+                }
+            }
+        }
+
+        // NCX fallback for TOC (and pageList) when the nav doc gave nothing
+        if (nav.Toc.Count == 0)
+        {
+            var ncxEntry = epub.Manifest.Values
+                .Where(v => v.MimeType.Contains("ncx", StringComparison.OrdinalIgnoreCase))
+                .Select(v => zip.GetEntry(NormalizePath(epub.OpfBaseDir + v.Href)))
+                .FirstOrDefault(e => e != null);
+            if (ncxEntry != null)
+            {
+                XDocument doc;
+                using (var s = ncxEntry.Open()) doc = XDocument.Load(s);
+
+                List<NavNode> WalkPoints(XElement parent)
+                {
+                    var nodes = new List<NavNode>();
+                    foreach (var np in parent.Elements().Where(e => e.Name.LocalName == "navPoint"))
+                    {
+                        var title = np.Descendants().FirstOrDefault(e => e.Name.LocalName == "text")?.Value ?? string.Empty;
+                        var src = np.Elements().FirstOrDefault(e => e.Name.LocalName == "content")?.Attribute("src")?.Value;
+                        var node = Resolve(src, epub.OpfBaseDir, title, null)
+                                   ?? new NavNode { Title = title.Trim() };
+                        node.Children = WalkPoints(np);
+                        nodes.Add(node);
+                    }
+                    return nodes;
+                }
+
+                var navMap = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "navMap");
+                if (navMap != null) nav.Toc = WalkPoints(navMap);
+
+                foreach (var pt in doc.Descendants().Where(e => e.Name.LocalName == "pageTarget"))
+                {
+                    var label = pt.Descendants().FirstOrDefault(e => e.Name.LocalName == "text")?.Value ?? string.Empty;
+                    var src = pt.Elements().FirstOrDefault(e => e.Name.LocalName == "content")?.Attribute("src")?.Value;
+                    var node = Resolve(src, epub.OpfBaseDir, label, null);
+                    if (node != null) nav.PageList.Add(node);
+                }
+            }
+        }
+
+        // No book ever shows a useless navigation: synthesize a TOC from the
+        // content when the parsed TOC is empty OR covers fewer than 2 distinct
+        // chapters while the spine has more (e.g. Calibre's single "Start"
+        // navPoint). A genuine multi-entry TOC is preserved untouched.
+        int distinctChapters = CountDistinctChapters(nav.Toc);
+        if (distinctChapters < 2 && epub.Spine.Count > 2)
+        {
+            nav.Toc = SynthesizeToc(epub, zip);
+            nav.TocGenerated = true;
+        }
+
+        return nav;
+    }
+
+    private static int CountDistinctChapters(List<NavNode> nodes)
+    {
+        var seen = new HashSet<int>();
+        void Walk(List<NavNode> ns)
+        {
+            foreach (var n in ns)
+            {
+                if (n.Chapter >= 0) seen.Add(n.Chapter);
+                if (n.Children.Count > 0) Walk(n.Children);
+            }
+        }
+        Walk(nodes);
+        return seen.Count;
+    }
+
+    private List<NavNode> SynthesizeToc(ParsedEpub epub, ZipArchive zip)
+    {
+        var toc = new List<NavNode>();
+        foreach (var item in epub.Spine)
+        {
+            string? heading = null;
+            try
+            {
+                var entry = zip.GetEntry(item.ZipPath);
+                if (entry != null)
+                {
+                    string html;
+                    using (var r = new StreamReader(entry.Open())) html = r.ReadToEnd();
+                    var m = Regex.Match(html, @"<h[1-6][^>]*>(.*?)</h[1-6]>",
+                        RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                    if (m.Success)
+                    {
+                        var text = Regex.Replace(m.Groups[1].Value, "<[^>]+>", " ");
+                        text = System.Net.WebUtility.HtmlDecode(text);
+                        text = Regex.Replace(text, @"\s+", " ").Trim();
+                        if (text.Length > 0) heading = text.Length > 80 ? text[..80] : text;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Heading scan failed for spine item {Path}", item.ZipPath);
+            }
+
+            var title = heading
+                ?? (item.Title.StartsWith("Chapter ", StringComparison.Ordinal) ? null : item.Title)
+                ?? $"Section {item.Index + 1}";
+            toc.Add(new NavNode { Title = title, Chapter = item.Index });
+        }
+        return toc;
+    }
+
     public string? GetChapterHtml(Guid itemId, int index, string serverUrl)
     {
         var epub = GetParsed(itemId);
@@ -160,7 +380,7 @@ public class EpubService
         using (var reader = new StreamReader(entry.Open()))
             html = reader.ReadToEnd();
 
-        return RewriteUrls(html, chapter.ZipPath, itemId, serverUrl);
+        return RewriteUrlsForItem(html, chapter.ZipPath, itemId, serverUrl);
     }
 
     public (Stream? Data, string ContentType) GetResource(Guid itemId, string path)
@@ -186,11 +406,25 @@ public class EpubService
         return (ms, mime);
     }
 
-    private static string RewriteUrls(string html, string chapterZipPath, Guid itemId, string serverUrl)
+    private string? RewriteUrlsForItem(string html, string chapterZipPath, Guid itemId, string serverUrl)
+    {
+        var epub = GetParsed(itemId);
+        var spineByPath = epub?.Spine.ToDictionary(s => s.ZipPath, s => s.Index)
+                          ?? new Dictionary<string, int>();
+        return RewriteUrls(html, chapterZipPath, itemId, serverUrl, spineByPath);
+    }
+
+    private static string RewriteUrls(string html, string chapterZipPath, Guid itemId, string serverUrl,
+        Dictionary<string, int> spineByPath)
     {
         var chapterDir = chapterZipPath.Contains('/')
             ? chapterZipPath[..(chapterZipPath.LastIndexOf('/') + 1)]
             : string.Empty;
+
+        // Mirror epub:type onto data-epub-type so the client can read it
+        // reliably (the namespaced attribute is awkward in HTML-parsed docs).
+        html = Regex.Replace(html, @"epub:type=""([^""]+)""",
+            m => $"epub:type=\"{m.Groups[1].Value}\" data-epub-type=\"{m.Groups[1].Value}\"");
 
         // Rewrite href="..." and src="..." attributes
         html = Regex.Replace(html, @"(href|src)=""([^""]+)""", m =>
@@ -203,7 +437,16 @@ public class EpubService
                 return m.Value;
             var urlNoAnchor = url.Contains('#') ? url[..url.IndexOf('#')] : url;
             var urlNoQuery = urlNoAnchor.Contains('?') ? urlNoAnchor[..urlNoAnchor.IndexOf('?')] : urlNoAnchor;
-            var resolved = NormalizePath(chapterDir + urlNoQuery);
+            var resolved = NormalizePath(chapterDir + Uri.UnescapeDataString(urlNoQuery));
+
+            // Internal document-to-document link: mark for client-side
+            // navigation instead of letting the iframe leave the reader.
+            if (attr == "href" && spineByPath.TryGetValue(resolved, out var spineIdx))
+            {
+                var anchor = url.Contains('#') ? url[(url.IndexOf('#') + 1)..] : string.Empty;
+                return $"href=\"#\" data-abr-chapter=\"{spineIdx}\" data-abr-anchor=\"{System.Net.WebUtility.HtmlEncode(anchor)}\"";
+            }
+
             return $"{attr}=\"{serverUrl}/A11yBookReader/resource/{itemId}?path={Uri.EscapeDataString(resolved)}\"";
         });
 

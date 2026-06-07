@@ -11,6 +11,10 @@ if (typeof window.a11yBookReader === 'undefined') {
         _pendingQuote: null,
         _ttsStartPara: null,   // restored Position: where Play resumes reading
         _ttsSaveTimer: null,   // 10s interval persisting the spoken position
+        // Navigation (Phase 3 book map)
+        _nav: null,            // {Toc, Landmarks, PageList} from the server
+        _navStack: [],         // locators to return to after link/TOC jumps
+        _pendingAnchor: null,  // fragment id to land on after a chapter load
         // Display settings (Phase 2 colophon) — server-synced, cross-device
         _ds: null,
         _dsSaveTimer: null,
@@ -383,6 +387,29 @@ if (typeof window.a11yBookReader === 'undefined') {
             rulerBtn.addEventListener('click', function () { self._toggleRuler(); });
             toolbar.appendChild(rulerBtn);
 
+            // Book map (TOC / pages / landmarks / go-to)
+            var mapBtn = document.createElement('button');
+            mapBtn.id = 'abr-bookmap-btn';
+            mapBtn.type = 'button';
+            mapBtn.className = 'abr-icon-btn';
+            mapBtn.setAttribute('aria-label', 'Book navigation');
+            mapBtn.setAttribute('aria-expanded', 'false');
+            mapBtn.setAttribute('aria-controls', 'abr-bookmap');
+            mapBtn.innerHTML = '<span class="material-icons" aria-hidden="true">toc</span>';
+            mapBtn.addEventListener('click', function () { self._toggleBookMap(); });
+            toolbar.appendChild(mapBtn);
+
+            // Back: return to the position before the last jump/link
+            var backBtn = document.createElement('button');
+            backBtn.id = 'abr-back-btn';
+            backBtn.type = 'button';
+            backBtn.className = 'abr-icon-btn';
+            backBtn.setAttribute('aria-label', 'Back to previous reading position');
+            backBtn.setAttribute('hidden', '');
+            backBtn.innerHTML = '<span class="material-icons" aria-hidden="true">undo</span>';
+            backBtn.addEventListener('click', function () { self._goBack(); });
+            toolbar.appendChild(backBtn);
+
             // Display settings (colophon)
             var colophonBtn = document.createElement('button');
             colophonBtn.id = 'abr-colophon-btn';
@@ -633,6 +660,8 @@ if (typeof window.a11yBookReader === 'undefined') {
 
             // Colophon panel (display settings) — lives between toolbar and content
             overlay.insertBefore(self._buildColophon(), contentArea);
+            // Book map panel
+            overlay.insertBefore(self._buildBookMap(), contentArea);
 
             document.body.appendChild(overlay);
             self._applyChromeTheme();
@@ -701,10 +730,11 @@ if (typeof window.a11yBookReader === 'undefined') {
             var src = '/A11yBookReader/chapter/' + self._currentItemId + '/' + self._chapterIndex;
 
             // Persist chapter turns immediately — but not when this load IS the
-            // resume jump (the pending anchor would be clobbered with 0).
-            // No text/Position anchor here: the OLD chapter is still in the
-            // frame, so any quote grabbed now would be from the wrong chapter.
-            if (self._pendingScrollFraction === null && self._pendingPara === null) {
+            // resume jump or a navigation jump (the pending anchor would be
+            // clobbered with 0). No text/Position anchor here: the OLD chapter
+            // is still in the frame, so any quote grabbed now would be wrong.
+            if (self._pendingScrollFraction === null && self._pendingPara === null &&
+                self._pendingAnchor === null) {
                 self._saveProgress(self._chapterIndex, 0, null);
             }
             frame.src = src;
@@ -777,7 +807,41 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (!doc.body.abrTapWired) {
                 doc.body.abrTapWired = true;
                 doc.addEventListener('click', function (e) {
-                    if (e.target.closest('a, button, input, select, textarea')) return;
+                    // Internal links route through the reader — never let the
+                    // iframe navigate away. Footnote refs open as popovers.
+                    var a = e.target.closest('a');
+                    if (a) {
+                        // epub:type is namespaced; HTML parsing exposes it via
+                        // attributes() not getAttribute('epub:type'). Check both
+                        // the literal name and the role mapping.
+                        var etype = a.getAttribute('epub:type') ||
+                            a.getAttributeNS('http://www.idpf.org/2007/ops', 'type') ||
+                            a.getAttribute('data-epub-type') || '';
+                        var role = a.getAttribute('role') || '';
+                        var isNoteref = /noteref/.test(etype) ||
+                            role === 'doc-noteref' || role === 'doc-backlink';
+                        if (a.dataset.abrChapter !== undefined) {
+                            e.preventDefault();
+                            var ch = parseInt(a.dataset.abrChapter, 10);
+                            var an = a.dataset.abrAnchor || null;
+                            if (isNoteref && an) self._showFootnote(ch, an, a.textContent);
+                            else self._goToTarget(ch, an, true);
+                            return;
+                        }
+                        var href = a.getAttribute('href') || '';
+                        if (href.startsWith('#')) {
+                            e.preventDefault();
+                            var id = href.slice(1);
+                            if (!id) return;
+                            if (isNoteref) { self._showFootnote(self._chapterIndex, id, a.textContent); return; }
+                            self._navStack.push(self._snapshotLocator());
+                            self._updateBackBtn();
+                            self._goToAnchor(id);
+                            return;
+                        }
+                        return; // external link: leave default behavior
+                    }
+                    if (e.target.closest('button, input, select, textarea')) return;
                     var sel = doc.getSelection && doc.getSelection();
                     if (sel && sel.toString()) return;
                     var x = e.clientX / doc.documentElement.clientWidth;
@@ -979,11 +1043,13 @@ if (typeof window.a11yBookReader === 'undefined') {
         },
 
         _setImmersive: function (on) {
-            // Close the colophon properly first so its button's aria-expanded
-            // stays truthful while the panel is hidden by immersive mode
+            // Close open panels properly first so their buttons' aria-expanded
+            // stays truthful while hidden by immersive mode
             if (on) {
                 var colophon = document.getElementById('abr-colophon');
                 if (colophon && !colophon.hasAttribute('hidden')) this._toggleColophon();
+                var bookmap = document.getElementById('abr-bookmap');
+                if (bookmap && !bookmap.hasAttribute('hidden')) this._toggleBookMap();
             }
             this._immersive = !!on;
             var overlay = document.getElementById('abr-overlay');
@@ -1012,6 +1078,15 @@ if (typeof window.a11yBookReader === 'undefined') {
             // close TTS settings → leave immersive → close the reader
             if (e.key === 'Escape' || e.key === 'GoBack' || e.key === 'BrowserBack') {
                 e.preventDefault();
+                var footnote = document.getElementById('abr-footnote');
+                if (footnote) {
+                    footnote.remove();
+                    var fr = document.getElementById('abr-frame');
+                    if (fr) fr.focus();
+                    return;
+                }
+                var bookmap = document.getElementById('abr-bookmap');
+                if (bookmap && !bookmap.hasAttribute('hidden')) { this._toggleBookMap(); return; }
                 var colophon = document.getElementById('abr-colophon');
                 if (colophon && !colophon.hasAttribute('hidden')) { this._toggleColophon(); return; }
                 var ttsPanel = document.getElementById('abr-tts-settings');
@@ -2117,6 +2192,370 @@ if (typeof window.a11yBookReader === 'undefined') {
             }, 800);
         },
 
+        // ── Book Map (Phase 3: TOC / pages / landmarks / go-to) ──────────────
+
+        _fetchNav: function () {
+            var self = this;
+            if (self._nav) return Promise.resolve(self._nav);
+            return ApiClient.ajax({
+                url: ApiClient.getUrl('A11yBookReader/nav/' + self._currentItemId),
+                type: 'GET',
+                dataType: 'json'
+            }).then(function (n) {
+                self._nav = {
+                    toc: n.Toc || n.toc || [],
+                    landmarks: n.Landmarks || n.landmarks || [],
+                    pageList: n.PageList || n.pageList || [],
+                    tocGenerated: n.TocGenerated || n.tocGenerated || false
+                };
+                return self._nav;
+            }).catch(function () {
+                self._nav = { toc: [], landmarks: [], pageList: [] };
+                return self._nav;
+            });
+        },
+
+        _snapshotLocator: function () {
+            return {
+                chapter: this._chapterIndex,
+                fraction: this._currentScrollFraction(),
+                para: this._firstVisiblePara()
+            };
+        },
+
+        // Jump to chapter+anchor; remembers where you came from
+        _goToTarget: function (chapter, anchor, pushBack) {
+            if (typeof chapter !== 'number' || chapter < 0 || chapter >= this._spine.length) return;
+            if (pushBack) {
+                this._navStack.push(this._snapshotLocator());
+                this._updateBackBtn();
+            }
+            if (chapter === this._chapterIndex) {
+                if (anchor) this._goToAnchor(anchor);
+                return;
+            }
+            this._pendingAnchor = anchor || '';
+            this._loadChapter(chapter);
+        },
+
+        _goToAnchor: function (anchor) {
+            try {
+                var frame = document.getElementById('abr-frame');
+                var doc = frame.contentDocument;
+                var el = anchor ? doc.getElementById(anchor) : null;
+                if (!el && anchor) {
+                    // name= anchors in older books
+                    var named = doc.getElementsByName ? doc.getElementsByName(anchor) : [];
+                    if (named && named.length) el = named[0];
+                }
+                if (!el) return;
+                if (this._viewMode === 'paged') {
+                    this._goToPage(Math.max(0, Math.min(this._pageCount - 1,
+                        Math.floor(el.offsetLeft / this._pageStep))), true);
+                } else {
+                    var win = frame.contentWindow;
+                    win.scrollTo(0, el.getBoundingClientRect().top + win.pageYOffset - 16);
+                    this._updateProgressUI();
+                }
+            } catch (e) {}
+        },
+
+        _goBack: function () {
+            var loc = this._navStack.pop();
+            this._updateBackBtn();
+            if (!loc) return;
+            if (loc.chapter === this._chapterIndex) {
+                if (!this._goToPara(loc.para)) {
+                    if (this._viewMode === 'paged') {
+                        this._goToPage(Math.round(loc.fraction * (this._pageCount - 1)), true);
+                    }
+                }
+                var info = document.getElementById('abr-chapter-info');
+                if (info) info.textContent = 'Returned to your reading position';
+                return;
+            }
+            this._pendingScrollFraction = loc.fraction;
+            this._pendingPara = loc.para;
+            this._loadChapter(loc.chapter);
+            var info2 = document.getElementById('abr-chapter-info');
+            if (info2) info2.textContent = 'Returning to your reading position';
+        },
+
+        _updateBackBtn: function () {
+            var btn = document.getElementById('abr-back-btn');
+            if (!btn) return;
+            if (this._navStack.length) btn.removeAttribute('hidden');
+            else btn.setAttribute('hidden', '');
+        },
+
+        _toggleBookMap: function () {
+            var self = this;
+            var panel = document.getElementById('abr-bookmap');
+            var btn = document.getElementById('abr-bookmap-btn');
+            if (!panel) return;
+            var opening = panel.hasAttribute('hidden');
+            if (!opening) {
+                panel.setAttribute('hidden', '');
+                if (btn) { btn.setAttribute('aria-expanded', 'false'); btn.focus(); }
+                return;
+            }
+            // Collapse the colophon so only one panel is open
+            var colophon = document.getElementById('abr-colophon');
+            if (colophon && !colophon.hasAttribute('hidden')) this._toggleColophon();
+            panel.removeAttribute('hidden');
+            if (btn) btn.setAttribute('aria-expanded', 'true');
+            this._fetchNav().then(function () {
+                self._renderBookMapTab(self._bookMapTab || 'toc');
+                var first = panel.querySelector('.abr-map-tab');
+                if (first) first.focus();
+            });
+        },
+
+        _buildBookMap: function () {
+            var self = this;
+            var panel = document.createElement('div');
+            panel.id = 'abr-bookmap';
+            panel.setAttribute('role', 'group');
+            panel.setAttribute('aria-label', 'Book navigation');
+            panel.setAttribute('hidden', '');
+
+            var tabs = document.createElement('div');
+            tabs.className = 'abr-map-tabs';
+            tabs.setAttribute('role', 'tablist');
+            tabs.setAttribute('aria-label', 'Navigation sections');
+            var defs = [['toc', 'Contents'], ['pages', 'Pages'], ['landmarks', 'Landmarks'], ['goto', 'Go to']];
+            defs.forEach(function (t) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'abr-map-tab';
+                b.id = 'abr-tab-' + t[0];
+                b.setAttribute('role', 'tab');
+                b.dataset.tab = t[0];
+                b.setAttribute('aria-selected', t[0] === 'toc' ? 'true' : 'false');
+                b.setAttribute('aria-controls', 'abr-map-body');
+                // Roving tabindex: only the selected tab is in the Tab order
+                b.tabIndex = t[0] === 'toc' ? 0 : -1;
+                b.textContent = t[1];
+                b.addEventListener('click', function () { self._renderBookMapTab(t[0]); });
+                // Left/Right (and TV d-pad) move between tabs per ARIA practice
+                b.addEventListener('keydown', function (e) {
+                    var i = defs.findIndex(function (d) { return d[0] === b.dataset.tab; });
+                    var ni = -1;
+                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') ni = (i + 1) % defs.length;
+                    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ni = (i - 1 + defs.length) % defs.length;
+                    else if (e.key === 'Home') ni = 0;
+                    else if (e.key === 'End') ni = defs.length - 1;
+                    if (ni >= 0) {
+                        e.preventDefault();
+                        e.stopPropagation(); // don't let the global arrow handler also fire
+                        self._renderBookMapTab(defs[ni][0]);
+                        var nb = document.getElementById('abr-tab-' + defs[ni][0]);
+                        if (nb) nb.focus();
+                    }
+                });
+                tabs.appendChild(b);
+            });
+            panel.appendChild(tabs);
+
+            var body = document.createElement('div');
+            body.id = 'abr-map-body';
+            body.setAttribute('role', 'tabpanel');
+            body.setAttribute('aria-labelledby', 'abr-tab-toc');
+            body.setAttribute('tabindex', '0');
+            panel.appendChild(body);
+            return panel;
+        },
+
+        _renderBookMapTab: function (tab) {
+            var self = this;
+            self._bookMapTab = tab;
+            var body = document.getElementById('abr-map-body');
+            if (!body || !self._nav) return;
+            document.querySelectorAll('.abr-map-tab').forEach(function (b) {
+                var sel = b.dataset.tab === tab;
+                b.setAttribute('aria-selected', sel ? 'true' : 'false');
+                b.tabIndex = sel ? 0 : -1;
+            });
+            body.setAttribute('aria-labelledby', 'abr-tab-' + tab);
+            body.innerHTML = '';
+
+            function jumpBtn(label, chapter, anchor, level) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'abr-map-item';
+                b.textContent = label;
+                if (level) b.style.paddingLeft = (12 + level * 18) + 'px';
+                if (chapter < 0) { b.disabled = true; }
+                else b.addEventListener('click', function () {
+                    self._goToTarget(chapter, anchor, true);
+                    self._toggleBookMap();
+                    // Announce AFTER focus has settled on the toolbar, or the
+                    // focus move swallows the live-region update
+                    setTimeout(function () {
+                        var info = document.getElementById('abr-chapter-info');
+                        if (info) info.textContent = 'Jumped to ' + label;
+                    }, 150);
+                });
+                return b;
+            }
+
+            function renderTree(nodes, level) {
+                nodes.forEach(function (n) {
+                    var title = n.Title || n.title || '';
+                    var ch = typeof n.Chapter === 'number' ? n.Chapter : n.chapter;
+                    var an = n.Anchor || n.anchor || null;
+                    if (title) body.appendChild(jumpBtn(title, ch, an, level));
+                    var kids = n.Children || n.children || [];
+                    if (kids.length) renderTree(kids, level + 1);
+                });
+            }
+
+            if (tab === 'toc') {
+                if (!self._nav.toc.length) {
+                    body.textContent = 'This book has no table of contents.';
+                } else {
+                    if (self._nav.tocGenerated) {
+                        var note = document.createElement('p');
+                        note.className = 'abr-map-note';
+                        note.textContent = 'Generated from the book’s sections — this book has no built-in contents.';
+                        body.appendChild(note);
+                    }
+                    renderTree(self._nav.toc, 0);
+                }
+            } else if (tab === 'pages') {
+                if (!self._nav.pageList.length) body.textContent = 'This book has no print page numbers.';
+                else renderTree(self._nav.pageList, 0);
+            } else if (tab === 'landmarks') {
+                if (!self._nav.landmarks.length) body.textContent = 'This book has no landmarks.';
+                else renderTree(self._nav.landmarks, 0);
+            } else {
+                // Go to: percent ("45%"), print page ("123"), or chapter ("c12")
+                var row = document.createElement('div');
+                row.className = 'abr-col-row';
+                var lab = document.createElement('label');
+                lab.setAttribute('for', 'abr-goto-input');
+                lab.className = 'abr-col-label';
+                lab.textContent = 'Page, percent, or c+chapter';
+                var inp = document.createElement('input');
+                inp.id = 'abr-goto-input';
+                inp.type = 'text';
+                inp.className = 'abr-goto-input';
+                inp.setAttribute('aria-describedby', 'abr-goto-hint');
+                var go = document.createElement('button');
+                go.type = 'button';
+                go.className = 'abr-col-choice';
+                go.textContent = 'Go';
+                var hint = document.createElement('span');
+                hint.id = 'abr-goto-hint';
+                hint.className = 'abr-col-label';
+                hint.textContent = 'Examples: 45% · 123 · c12';
+                function fail(msg) {
+                    hint.textContent = msg;
+                    hint.classList.add('abr-contrast-warn');
+                    inp.focus();
+                }
+                function doGo() {
+                    var v = (inp.value || '').trim();
+                    if (!v) return;
+                    var n = self._spine.length;
+                    if (v.endsWith('%')) {
+                        var pct = parseFloat(v);
+                        if (isNaN(pct)) { fail('Enter a percentage like 45%'); return; }
+                        var total = Math.max(0, Math.min(1, pct / 100)) * n;
+                        var ch = Math.min(n - 1, Math.floor(total));
+                        self._navStack.push(self._snapshotLocator());
+                        self._updateBackBtn();
+                        self._pendingScrollFraction = total - ch;
+                        self._loadChapter(ch);
+                    } else if (/^c\d+$/i.test(v)) {
+                        var ci = parseInt(v.slice(1), 10) - 1;
+                        if (ci < 0 || ci >= n) { fail('No chapter ' + v.slice(1) + ' (1–' + n + ')'); return; }
+                        self._goToTarget(ci, null, true);
+                    } else if (/^\d+$/.test(v) && self._nav.pageList.length) {
+                        var hit = self._nav.pageList.find(function (p) {
+                            return (p.Title || p.title || '').trim() === v;
+                        });
+                        if (!hit) { fail('No page "' + v + '" in this book'); return; }
+                        self._goToTarget(
+                            typeof hit.Chapter === 'number' ? hit.Chapter : hit.chapter,
+                            hit.Anchor || hit.anchor || null, true);
+                    } else if (/^\d+$/.test(v)) {
+                        var pi = parseInt(v, 10) - 1;
+                        if (pi < 0 || pi >= n) { fail('No chapter ' + v + ' (1–' + n + ')'); return; }
+                        self._goToTarget(pi, null, true);
+                    } else {
+                        fail('Try a percent (45%), page number, or c+chapter (c12)');
+                        return;
+                    }
+                    self._toggleBookMap();
+                }
+                go.addEventListener('click', doGo);
+                inp.addEventListener('keydown', function (e) {
+                    if (e.key === 'Enter') { e.preventDefault(); doGo(); }
+                });
+                row.appendChild(lab);
+                row.appendChild(inp);
+                row.appendChild(go);
+                body.appendChild(row);
+                body.appendChild(hint);
+            }
+        },
+
+        // ── Footnote popover ─────────────────────────────────────────────────
+
+        _showFootnote: function (chapter, anchor, label) {
+            var self = this;
+            function render(text) {
+                var old = document.getElementById('abr-footnote');
+                if (old) old.remove();
+                var pop = document.createElement('div');
+                pop.id = 'abr-footnote';
+                pop.setAttribute('role', 'dialog');
+                pop.setAttribute('aria-modal', 'true');
+                pop.setAttribute('aria-label', 'Note');
+                // Trap Tab inside the popover (only the Return button is
+                // focusable, so just keep focus on it)
+                pop.addEventListener('keydown', function (e) {
+                    if (e.key === 'Tab') { e.preventDefault(); ret.focus(); }
+                });
+                var content = document.createElement('div');
+                content.className = 'abr-footnote-text';
+                content.textContent = text || 'Note not found.';
+                var ret = document.createElement('button');
+                ret.type = 'button';
+                ret.className = 'abr-col-choice';
+                ret.textContent = 'Return to reading';
+                ret.addEventListener('click', function () {
+                    pop.remove();
+                    var frame = document.getElementById('abr-frame');
+                    if (frame) frame.focus();
+                });
+                pop.appendChild(content);
+                pop.appendChild(ret);
+                var area = document.getElementById('abr-content-area');
+                if (area) area.appendChild(pop);
+                self._tvFocusSweep(pop);
+                ret.focus();
+            }
+
+            try {
+                if (chapter === this._chapterIndex) {
+                    var doc = document.getElementById('abr-frame').contentDocument;
+                    var el = doc.getElementById(anchor);
+                    render(el ? el.textContent.replace(/\s+/g, ' ').trim() : null);
+                    return;
+                }
+                ApiClient.ajax({
+                    url: ApiClient.getUrl('A11yBookReader/chapter/' + this._currentItemId + '/' + chapter),
+                    type: 'GET', dataType: 'text'
+                }).then(function (html) {
+                    var parsed = new DOMParser().parseFromString(html, 'text/html');
+                    var el = parsed.getElementById(anchor);
+                    render(el ? el.textContent.replace(/\s+/g, ' ').trim() : null);
+                }).catch(function () { render(null); });
+            } catch (e) { render(null); }
+        },
+
         // ── Colophon Panel (display settings UI) ─────────────────────────────
 
         _toggleColophon: function () {
@@ -2570,6 +3009,13 @@ if (typeof window.a11yBookReader === 'undefined') {
             try {
                 var win = frame.contentWindow;
                 var doc = win.document.documentElement;
+                // Navigation jump: land on the requested anchor (or chapter top)
+                if (self._pendingAnchor !== null) {
+                    var anchor = self._pendingAnchor;
+                    self._pendingAnchor = null;
+                    if (anchor) self._goToAnchor(anchor);
+                    else self._saveProgress(self._chapterIndex, 0, 0);
+                }
                 // Apply the resume locator held from _openReader, exactly once.
                 // Standards resolution order: structural Position → text quote
                 // (survives layout/edition changes) → progression fallback.

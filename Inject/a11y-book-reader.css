@@ -514,6 +514,129 @@
 
 #abr-overlay.abr-immersive #abr-colophon { display: none; }
 
+/* ─── Book Map (Phase 3) ─────────────────────────────────────────────── */
+
+#abr-bookmap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 20px;
+    border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+    max-height: 50vh;
+    flex-shrink: 0;
+}
+
+#abr-bookmap[hidden] { display: none; }
+
+#abr-overlay.abr-themed #abr-bookmap {
+    background: color-mix(in srgb, var(--abr-page-bg) 94%, black);
+    border-color: color-mix(in srgb, var(--abr-page-fg) 22%, transparent);
+    color: var(--abr-page-fg);
+}
+
+.abr-map-tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.abr-map-tab {
+    min-height: 40px; /* WCAG 2.5.8 */
+    padding: 6px 16px;
+    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.abr-map-tab[aria-selected="true"] {
+    background: color-mix(in srgb, var(--abr-ribbon) 25%, transparent);
+    border-color: var(--abr-ribbon);
+    font-weight: 600;
+}
+
+#abr-map-body {
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.abr-map-item {
+    text-align: left;
+    min-height: 40px; /* WCAG 2.5.8 */
+    padding: 8px 12px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.95rem;
+}
+
+.abr-map-item:hover:not([disabled]) {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.abr-map-item[disabled] {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.abr-goto-input {
+    min-height: 40px; /* WCAG 2.5.8 */
+    padding: 6px 10px;
+    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, currentColor 6%, transparent);
+    color: inherit;
+    font-size: 1rem;
+    width: 10em;
+}
+
+.abr-goto-input:focus {
+    outline: 3px solid #00a4dc;
+    outline-offset: 2px;
+}
+
+.abr-map-note {
+    margin: 0 0 6px;
+    padding: 6px 12px;
+    font-size: 0.85rem;
+    border-left: 3px solid var(--abr-ribbon);
+}
+
+#abr-overlay.abr-immersive #abr-bookmap { display: none; }
+
+/* ─── Footnote popover ───────────────────────────────────────────────── */
+
+#abr-footnote {
+    position: absolute;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    max-width: min(640px, calc(100% - 48px));
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 20px;
+    border-radius: 10px;
+    border: 2px solid color-mix(in srgb, var(--abr-page-fg, #fff) 50%, transparent);
+    background: var(--abr-page-bg, #1a1a1a);
+    color: var(--abr-page-fg, #fff);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+}
+
+.abr-footnote-text {
+    font-size: 1rem;
+    line-height: 1.5;
+    max-height: 30vh;
+    overflow-y: auto;
+}
+
 /* In-app reduced-motion setting: no chrome transitions or animations at all */
 #abr-overlay.abr-reduce *,
 #abr-overlay.abr-reduce {
