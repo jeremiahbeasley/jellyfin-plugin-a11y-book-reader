@@ -7,7 +7,7 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.0.14</Version>
+    <Version>1.0.0.19</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +20,9 @@
     <EmbeddedResource Include="Configuration\configPage.html" />
     <EmbeddedResource Include="Inject\a11y-book-reader.js" />
     <EmbeddedResource Include="Inject\a11y-book-reader.css" />
+    <EmbeddedResource Include="Fonts\OpenDyslexic-Regular.woff2" />
+    <EmbeddedResource Include="Fonts\OpenDyslexic-Bold.woff2" />
+    <EmbeddedResource Include="Fonts\OpenDyslexic-Italic.woff2" />
   </ItemGroup>
 
 </Project>

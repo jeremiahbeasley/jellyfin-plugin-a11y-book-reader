@@ -26,7 +26,24 @@ deliberate deviations here.
 - Whole-UI requirement, all platforms (web, TV/remote, mobile). Notables in
   use: 2.5.8 target size, 1.4.11 non-text contrast, 2.5.3 label-in-name,
   4.1.2 name/role/value, focus visible everywhere, `prefers-reduced-motion`
-  honored alongside an in-app toggle (planned, Phase 2).
+  honored alongside an in-app toggle (Phase 2).
+- **No dimmed text, ever** (project rule, 2026-06-07): secondary text gets
+  hierarchy from size/weight, never reduced opacity or muted color — dimming
+  is a contrast tax on exactly the users this reader serves. Sole permitted
+  opacity reduction: the disabled-control state (WCAG inactive exemption).
+
+### Fonts — SIL Open Font License
+- OpenDyslexic (v0.91.12) is bundled for the dyslexia-friendly reading option,
+  redistributed unmodified under the SIL OFL 1.1 with attribution in
+  `Fonts/LICENSE-OpenDyslexic.txt`. Any future bundled font must carry a
+  redistribution-compatible license and its notice file.
+
+### Reader settings — cross-device by design (Phase 2)
+- Per-user display settings (type, spacing, margins, theme, motion, view
+  mode) are stored server-side and follow the user to every device; only
+  device-specific values (TTS voice URIs) stay client-local. No standard
+  schema exists for reader settings; ours is documented in
+  `Models/ReaderSettings.cs` and clamped server-side.
 
 ## Planned (do NOT build private versions of these)
 

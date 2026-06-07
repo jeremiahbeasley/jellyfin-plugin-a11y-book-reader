@@ -12,5 +12,6 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<EpubService>();
         serviceCollection.AddSingleton<PiperService>();
         serviceCollection.AddSingleton<ProgressService>();
+        serviceCollection.AddSingleton<SettingsService>();
     }
 }

@@ -1,0 +1,11 @@
+OpenDyslexic font (https://opendyslexic.org)
+Copyright (c) 2019-07-29, Abbie Gonzalez (https://abbiecod.es | support@abbiecod.es),
+with Reserved Font Name OpenDyslexic.
+Copyright (c) 12/2012 - 2019
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is available with a FAQ at: http://scripts.sil.org/OFL
+
+The OpenDyslexic-Regular, OpenDyslexic-Bold, and OpenDyslexic-Italic woff2
+files in this directory are redistributed unmodified from the official
+release v0.91.12 (https://github.com/antijingoist/opendyslexic).

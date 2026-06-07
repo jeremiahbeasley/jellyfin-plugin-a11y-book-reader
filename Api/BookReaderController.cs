@@ -15,13 +15,15 @@ public class BookReaderController : ControllerBase
     private readonly EpubService _epub;
     private readonly PiperService _piper;
     private readonly ProgressService _progress;
+    private readonly SettingsService _settings;
     private readonly ILogger<BookReaderController> _logger;
 
-    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, ILogger<BookReaderController> logger)
+    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, ILogger<BookReaderController> logger)
     {
         _epub = epub;
         _piper = piper;
         _progress = progress;
+        _settings = settings;
         _logger = logger;
     }
 
@@ -114,6 +116,45 @@ public class BookReaderController : ControllerBase
 
         _progress.Save(userId.Value, itemId, locator);
         return NoContent();
+    }
+
+    // ── Reader settings (cross-device, per user) ──────────────────────────────
+
+    [HttpGet("settings")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<ReaderSettings> GetSettings()
+    {
+        var userId = GetUserId();
+        if (userId == null) return Unauthorized();
+        var settings = _settings.Get(userId.Value);
+        if (settings == null) return NotFound();
+        return settings;
+    }
+
+    [HttpPost("settings")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public ActionResult SaveSettings([FromBody] ReaderSettings settings)
+    {
+        var userId = GetUserId();
+        if (userId == null) return Unauthorized();
+        _settings.Save(userId.Value, settings);
+        return NoContent();
+    }
+
+    // ── Bundled fonts ─────────────────────────────────────────────────────────
+
+    private static readonly string[] AllowedFonts =
+    {
+        "OpenDyslexic-Regular.woff2", "OpenDyslexic-Bold.woff2", "OpenDyslexic-Italic.woff2",
+    };
+
+    [HttpGet("font/{name}")]
+    [AllowAnonymous]
+    public ActionResult GetFont(string name)
+    {
+        if (!AllowedFonts.Contains(name, StringComparer.OrdinalIgnoreCase)) return NotFound();
+        return ServeEmbedded("Fonts." + name, "font/woff2");
     }
 
     // ── Piper status & management ─────────────────────────────────────────────

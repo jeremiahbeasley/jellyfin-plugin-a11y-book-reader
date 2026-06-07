@@ -35,7 +35,7 @@
 
 .abr-chapter-info {
     font-size: 0.85rem;
-    color: color-mix(in srgb, currentColor 65%, transparent);
+    color: inherit;
     white-space: nowrap;
     flex-shrink: 0;
 }
@@ -115,7 +115,7 @@
 
 .abr-chapter-label {
     font-size: 0.9rem;
-    color: color-mix(in srgb, currentColor 70%, transparent);
+    color: inherit;
 }
 
 /* ─── TTS button states ──────────────────────────────────────────────── */
@@ -166,7 +166,7 @@
 
 .abr-settings-label {
     font-size: 0.82rem;
-    color: color-mix(in srgb, currentColor 65%, transparent);
+    color: inherit;
     white-space: nowrap;
     user-select: none;
 }
@@ -394,4 +394,129 @@
     #abr-tts-toggle.abr-tts-active {
         animation: none;
     }
+}
+
+/* ─── Theme-derived chrome (Phase 2) ─────────────────────────────────── */
+/* The bars take their surface from the active page theme: a sepia page
+   gets sepia-tinted chrome, never a gray app frame around a warm page. */
+
+#abr-overlay.abr-themed {
+    background: color-mix(in srgb, var(--abr-page-bg) 88%, black);
+    color: var(--abr-page-fg);
+}
+
+#abr-overlay.abr-themed #abr-toolbar,
+#abr-overlay.abr-themed #abr-nav,
+#abr-overlay.abr-themed #abr-tts-settings,
+#abr-overlay.abr-themed #abr-colophon {
+    background: color-mix(in srgb, var(--abr-page-bg) 94%, black);
+    border-color: color-mix(in srgb, var(--abr-page-fg) 22%, transparent);
+    color: var(--abr-page-fg);
+}
+
+#abr-overlay.abr-themed #abr-frame {
+    background: var(--abr-page-bg);
+}
+
+/* ─── Colophon Panel ─────────────────────────────────────────────────── */
+
+#abr-colophon {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 20px;
+    border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+    max-height: 46vh;
+    overflow-y: auto;
+    flex-shrink: 0;
+}
+
+#abr-colophon[hidden] { display: none; }
+
+.abr-col-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.abr-col-row[hidden] { display: none; }
+
+.abr-col-label {
+    min-width: 9.5em;
+    font-size: 0.85rem;
+
+    user-select: none;
+}
+
+.abr-col-step {
+    min-width: 40px;
+    min-height: 40px; /* WCAG 2.5.8 */
+    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: inherit;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.abr-col-value {
+    min-width: 4.5em;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.9rem;
+}
+
+.abr-col-choice {
+    min-height: 40px; /* WCAG 2.5.8 */
+    padding: 6px 14px;
+    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    border-radius: 6px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.88rem;
+}
+
+.abr-col-choice[aria-checked="true"],
+.abr-col-choice[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--abr-ribbon) 25%, transparent);
+    border-color: var(--abr-ribbon);
+}
+
+.abr-col-color {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85rem;
+}
+
+.abr-col-color input[type="color"] {
+    width: 44px;
+    height: 40px; /* WCAG 2.5.8 */
+    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+}
+
+#abr-contrast-readout {
+    font-size: 0.85rem;
+}
+
+#abr-contrast-readout.abr-contrast-warn {
+
+    font-weight: 600;
+
+}
+
+#abr-overlay.abr-immersive #abr-colophon { display: none; }
+
+/* In-app reduced-motion setting: no chrome transitions or animations at all */
+#abr-overlay.abr-reduce *,
+#abr-overlay.abr-reduce {
+    transition: none !important;
+    animation: none !important;
 }

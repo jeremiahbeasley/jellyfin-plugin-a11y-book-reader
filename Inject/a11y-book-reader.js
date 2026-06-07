@@ -11,6 +11,16 @@ if (typeof window.a11yBookReader === 'undefined') {
         _pendingQuote: null,
         _ttsStartPara: null,   // restored Position: where Play resumes reading
         _ttsSaveTimer: null,   // 10s interval persisting the spoken position
+        // Display settings (Phase 2 colophon) — server-synced, cross-device
+        _ds: null,
+        _dsSaveTimer: null,
+        _dsDefaults: {
+            FontFamily: 'publisher', FontSizePct: 100, LineHeightPct: 150,
+            LetterSpacing: 0, WordSpacing: 0, ParaSpacingPct: 100,
+            MarginPct: 6, Align: 'left', Theme: 'light',
+            CustomFg: '#1a1a1a', CustomBg: '#fafaf7',
+            ReducedMotion: false, ViewMode: 'scroll', Ruler: false, TtsRatePct: 100
+        },
         _scrollSaveTimer: null,
         // Reading view state (Phase 1)
         _viewMode: 'scroll',     // 'paged' | 'scroll'
@@ -186,7 +196,17 @@ if (typeof window.a11yBookReader === 'undefined') {
                 readBtn.innerHTML = '<span class="abr-btn-spinner" aria-hidden="true"></span><span> Opening…</span>';
             }
 
-            self._fetchSpine(itemId).then(function (spine) {
+            // Settings load first so the reader opens already themed and in
+            // the user's view mode (cross-device)
+            self._fetchDisplaySettings().then(function () {
+                var ds = self._ds;
+                self._viewMode = ds.ViewMode === 'paged' ? 'paged' : 'scroll';
+                self._rulerOn = !!ds.Ruler;
+                self._ttsRate = (ds.TtsRatePct || 100) / 100;
+                self._reducedMotion = ds.ReducedMotion ||
+                    !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+                return self._fetchSpine(itemId);
+            }).then(function (spine) {
                 if (readBtn) {
                     readBtn.disabled = false;
                     readBtn.removeAttribute('aria-busy');
@@ -363,6 +383,18 @@ if (typeof window.a11yBookReader === 'undefined') {
             rulerBtn.addEventListener('click', function () { self._toggleRuler(); });
             toolbar.appendChild(rulerBtn);
 
+            // Display settings (colophon)
+            var colophonBtn = document.createElement('button');
+            colophonBtn.id = 'abr-colophon-btn';
+            colophonBtn.type = 'button';
+            colophonBtn.className = 'abr-icon-btn';
+            colophonBtn.setAttribute('aria-label', 'Display settings');
+            colophonBtn.setAttribute('aria-expanded', 'false');
+            colophonBtn.setAttribute('aria-controls', 'abr-colophon');
+            colophonBtn.innerHTML = '<span class="material-icons" aria-hidden="true">text_format</span>';
+            colophonBtn.addEventListener('click', function () { self._toggleColophon(); });
+            toolbar.appendChild(colophonBtn);
+
             // Immersive (distraction-reduced) mode toggle
             // An action, not a toggle: while "pressed" the toolbar is gone, so
             // aria-pressed could never be perceived (4.1.2)
@@ -415,7 +447,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                 });
                 speedSelect.addEventListener('change', function () {
                     self._ttsRate = parseFloat(speedSelect.value);
-                    self._saveSettings();
+                    if (self._ds) { self._ds.TtsRatePct = Math.round(self._ttsRate * 100); self._saveDisplaySettings(); }
                     if (self._ttsPlaying && !self._ttsPaused) {
                         if (self._piperAudio) {
                             // Speed is baked into the synthesis — restart the
@@ -599,7 +631,11 @@ if (typeof window.a11yBookReader === 'undefined') {
                 if (Math.abs(dx) > 50) self._turn(dx < 0 ? 1 : -1);
             });
 
+            // Colophon panel (display settings) — lives between toolbar and content
+            overlay.insertBefore(self._buildColophon(), contentArea);
+
             document.body.appendChild(overlay);
+            self._applyChromeTheme();
 
             // Voices require the select to be in the live DOM — populate now
             self._populateVoices();
@@ -786,17 +822,32 @@ if (typeof window.a11yBookReader === 'undefined') {
             var self = this;
             var w = frame.clientWidth;
             var keepFraction = self._pageCount > 1 ? self._page / (self._pageCount - 1) : 0;
+            var ds = self._ds || self._dsDefaults;
+            // Margin setting drives the page gutters in both modes
+            var marginPx = Math.round(w * ds.MarginPct / 100);
+            var reading = self._readingCss();
 
             if (self._viewMode === 'paged') {
-                style.textContent =
+                style.textContent = reading +
                     'html{height:100%;overflow:hidden;}' +
-                    'body{height:100%;margin:0;padding:24px 40px;box-sizing:border-box;' +
-                    'column-width:' + (w - 80) + 'px;column-gap:80px;column-fill:auto;' +
-                    'overflow:hidden;}' +
+                    // NOTE: no overflow:hidden on body — an element's overflow
+                    // clip moves WITH its own transform, so a clipped body
+                    // slides its window off-screen on page turns (blank page).
+                    // The static html element does the clipping instead.
+                    'body{height:100%;margin:0;padding:24px ' + marginPx + 'px;box-sizing:border-box;' +
+                    'column-width:' + (w - marginPx * 2) + 'px;column-gap:' + (marginPx * 2) + 'px;column-fill:auto;}' +
                     'img,svg,video{max-width:100%;max-height:90vh;}' +
                     (self._reducedMotion ? '' :
                         'body{transition:transform 0.18s ease-out;}');
                 self._pageStep = w;
+                // Leaving scroll mode: the html element keeps its scroll offset
+                // even under overflow:hidden, leaving the viewport past the
+                // now-one-screen-tall column box → blank page. Reset it.
+                try {
+                    doc.documentElement.scrollTop = 0;
+                    doc.documentElement.scrollLeft = 0;
+                    if (doc.body.scrollTop) doc.body.scrollTop = 0;
+                } catch (e) {}
                 // Force layout, then measure total horizontal flow
                 var total = doc.body.scrollWidth;
                 self._pageCount = Math.max(1, Math.round(total / w));
@@ -805,9 +856,9 @@ if (typeof window.a11yBookReader === 'undefined') {
                 self._enterAtEnd = false;
                 self._goToPage(Math.min(entry, self._pageCount - 1), true);
             } else {
-                style.textContent =
+                style.textContent = reading +
                     'html{overflow-y:auto;}' +
-                    'body{margin:0;padding:24px 40px;column-width:auto;transform:none;}' +
+                    'body{margin:0;padding:24px ' + marginPx + 'px;column-width:auto;transform:none;}' +
                     'img,svg,video{max-width:100%;}';
                 doc.body.style.transform = '';
                 self._page = 0;
@@ -821,6 +872,9 @@ if (typeof window.a11yBookReader === 'undefined') {
             var doc; try { doc = frame.contentDocument; } catch (e) { return; }
             if (!doc || !doc.body) return;
             this._page = Math.max(0, Math.min(page, this._pageCount - 1));
+            // Pin the html element: anything that programmatically scrolled it
+            // (smooth scrolls, focus jumps) would skew the page alignment
+            try { doc.documentElement.scrollLeft = 0; doc.documentElement.scrollTop = 0; } catch (e) {}
             if (instant || this._reducedMotion) doc.body.style.transitionDuration = '0s';
             else doc.body.style.transitionDuration = '';
             doc.body.style.transform = 'translateX(' + (-this._page * this._pageStep) + 'px)';
@@ -869,7 +923,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             var keep = this._currentScrollFraction();
             this._viewMode = this._viewMode === 'paged' ? 'scroll' : 'paged';
             this._pendingScrollFraction = keep;
-            this._saveSettings();
+            if (this._ds) { this._ds.ViewMode = this._viewMode; this._saveDisplaySettings(); }
             var btn = document.getElementById('abr-mode-toggle');
             if (btn) {
                 btn.setAttribute('aria-pressed', this._viewMode === 'paged' ? 'true' : 'false');
@@ -907,7 +961,7 @@ if (typeof window.a11yBookReader === 'undefined') {
 
         _toggleRuler: function () {
             this._rulerOn = !this._rulerOn;
-            this._saveSettings();
+            if (this._ds) { this._ds.Ruler = this._rulerOn; this._saveDisplaySettings(); }
             var btn = document.getElementById('abr-ruler-toggle');
             if (btn) btn.setAttribute('aria-pressed', this._rulerOn ? 'true' : 'false');
             var ruler = document.getElementById('abr-ruler');
@@ -925,6 +979,12 @@ if (typeof window.a11yBookReader === 'undefined') {
         },
 
         _setImmersive: function (on) {
+            // Close the colophon properly first so its button's aria-expanded
+            // stays truthful while the panel is hidden by immersive mode
+            if (on) {
+                var colophon = document.getElementById('abr-colophon');
+                if (colophon && !colophon.hasAttribute('hidden')) this._toggleColophon();
+            }
             this._immersive = !!on;
             var overlay = document.getElementById('abr-overlay');
             if (overlay) overlay.classList.toggle('abr-immersive', this._immersive);
@@ -948,9 +1008,19 @@ if (typeof window.a11yBookReader === 'undefined') {
             var overlay = document.getElementById('abr-overlay');
             if (!overlay) return;
 
-            // Escape / TV back: leave immersive mode first, close on the next press
+            // Escape / TV back, in priority order: close the colophon panel →
+            // close TTS settings → leave immersive → close the reader
             if (e.key === 'Escape' || e.key === 'GoBack' || e.key === 'BrowserBack') {
                 e.preventDefault();
+                var colophon = document.getElementById('abr-colophon');
+                if (colophon && !colophon.hasAttribute('hidden')) { this._toggleColophon(); return; }
+                var ttsPanel = document.getElementById('abr-tts-settings');
+                if (ttsPanel && !ttsPanel.hasAttribute('hidden')) {
+                    ttsPanel.setAttribute('hidden', '');
+                    var tsBtn = document.getElementById('abr-tts-settings-btn');
+                    if (tsBtn) { tsBtn.setAttribute('aria-expanded', 'false'); tsBtn.focus(); }
+                    return;
+                }
                 if (this._immersive) { this._setImmersive(false); return; }
                 this._closeReader(); return;
             }
@@ -1403,19 +1473,38 @@ if (typeof window.a11yBookReader === 'undefined') {
                     box.id = 'abr-hl-box';
                     box.style.cssText = 'position:absolute;pointer-events:none;' +
                         'background:rgba(255,215,0,.45);border-radius:2px;' +
-                        'z-index:2147483647;transition:left 80ms,top 80ms,width 80ms;';
+                        'z-index:2147483647;' +
+                        (this._reducedMotion ? '' : 'transition:left 80ms,top 80ms,width 80ms;');
                     iframeDoc.body.appendChild(box);
                 }
-                var sx = iframeWin.pageXOffset || 0;
-                var sy = iframeWin.pageYOffset || 0;
-                box.style.left = (rect.left + sx - 1) + 'px';
-                box.style.top = (rect.top + sy - 1) + 'px';
+                if (this._viewMode === 'paged') {
+                    // The transformed body is the box's containing block, so
+                    // position in body-layout space: viewport rect minus the
+                    // body's (transform-inclusive) rect. Viewport coords here
+                    // would land the box one page-width off per page.
+                    var bodyRect = iframeDoc.body.getBoundingClientRect();
+                    box.style.left = (rect.left - bodyRect.left - 1) + 'px';
+                    box.style.top = (rect.top - bodyRect.top - 1) + 'px';
+                } else {
+                    var sx = iframeWin.pageXOffset || 0;
+                    var sy = iframeWin.pageYOffset || 0;
+                    box.style.left = (rect.left + sx - 1) + 'px';
+                    box.style.top = (rect.top + sy - 1) + 'px';
+                }
                 box.style.width = (rect.width + 2) + 'px';
                 box.style.height = (rect.height + 2) + 'px';
                 box.style.display = 'block';
 
-                // Scroll word into view if near edge
-                if (entry.node.parentElement) {
+                // Follow the reading: turn the page (paged) / scroll (scroll).
+                // NEVER scrollIntoView in paged mode — it drags the html
+                // element to arbitrary offsets and breaks page alignment.
+                if (this._viewMode === 'paged') {
+                    var bRect = iframeDoc.body.getBoundingClientRect();
+                    var layoutX = rect.left - bRect.left;
+                    var targetPage = Math.max(0, Math.min(this._pageCount - 1,
+                        Math.floor(layoutX / this._pageStep)));
+                    if (targetPage !== this._page) this._goToPage(targetPage);
+                } else if (entry.node.parentElement) {
                     var el = entry.node.parentElement;
                     var erect = el.getBoundingClientRect();
                     var vh = iframeWin.innerHeight || iframeDoc.documentElement.clientHeight;
@@ -1958,29 +2047,372 @@ if (typeof window.a11yBookReader === 'undefined') {
             return 'abr-settings-' + userId + '-' + this._getPlatformKey();
         },
 
+        // Device-local settings: ONLY the TTS voice (voice URIs are
+        // platform-specific). Everything else lives server-side in _ds.
         _loadSettings: function () {
             try {
-                this._reducedMotion = !!(window.matchMedia &&
-                    window.matchMedia('(prefers-reduced-motion: reduce)').matches);
                 var raw = localStorage.getItem(this._getSettingsKey());
                 if (!raw) return;
                 var s = JSON.parse(raw);
-                if (typeof s.rate === 'number' && s.rate >= 0.5 && s.rate <= 3) this._ttsRate = s.rate;
                 if (typeof s.voice === 'string') this._ttsVoiceURI = s.voice;
-                if (s.viewMode === 'paged' || s.viewMode === 'scroll') this._viewMode = s.viewMode;
-                if (typeof s.ruler === 'boolean') this._rulerOn = s.ruler;
             } catch (e) {}
         },
 
         _saveSettings: function () {
             try {
                 localStorage.setItem(this._getSettingsKey(), JSON.stringify({
-                    rate: this._ttsRate,
-                    voice: this._ttsVoiceURI,
-                    viewMode: this._viewMode,
-                    ruler: this._rulerOn
+                    voice: this._ttsVoiceURI
                 }));
             } catch (e) {}
+        },
+
+        // ── Display Settings (colophon) ──────────────────────────────────────
+
+        _fetchDisplaySettings: function () {
+            var self = this;
+            return ApiClient.ajax({
+                url: ApiClient.getUrl('A11yBookReader/settings'),
+                type: 'GET',
+                dataType: 'json'
+            }).then(function (s) {
+                self._ds = self._mergeSettings(s);
+            }).catch(function () {
+                // No server settings yet (or offline): local cache, then defaults
+                try {
+                    var raw = localStorage.getItem('abr-display-' +
+                        (ApiClient.getCurrentUserId ? ApiClient.getCurrentUserId() : 'anon'));
+                    self._ds = self._mergeSettings(raw ? JSON.parse(raw) : null);
+                } catch (e) { self._ds = self._mergeSettings(null); }
+            });
+        },
+
+        _mergeSettings: function (s) {
+            var out = {};
+            var d = this._dsDefaults;
+            for (var k in d) {
+                var v = s ? (s[k] !== undefined ? s[k] : s[k.charAt(0).toLowerCase() + k.slice(1)]) : undefined;
+                out[k] = (v === undefined || v === null) ? d[k] : v;
+            }
+            return out;
+        },
+
+        // Debounced server save + local cache (offline fallback)
+        _saveDisplaySettings: function () {
+            var self = this;
+            try {
+                localStorage.setItem('abr-display-' +
+                    (ApiClient.getCurrentUserId ? ApiClient.getCurrentUserId() : 'anon'),
+                    JSON.stringify(self._ds));
+            } catch (e) {}
+            if (self._dsSaveTimer) clearTimeout(self._dsSaveTimer);
+            self._dsSaveTimer = setTimeout(function () {
+                try {
+                    ApiClient.ajax({
+                        url: ApiClient.getUrl('A11yBookReader/settings'),
+                        type: 'POST',
+                        contentType: 'application/json',
+                        data: JSON.stringify(self._ds)
+                    }).catch(function () {});
+                } catch (e) {}
+            }, 800);
+        },
+
+        // ── Colophon Panel (display settings UI) ─────────────────────────────
+
+        _toggleColophon: function () {
+            var panel = document.getElementById('abr-colophon');
+            var btn = document.getElementById('abr-colophon-btn');
+            if (!panel) return;
+            var opening = panel.hasAttribute('hidden');
+            if (opening) {
+                panel.removeAttribute('hidden');
+                if (btn) btn.setAttribute('aria-expanded', 'true');
+                var first = panel.querySelector('button, input, select');
+                if (first) first.focus();
+            } else {
+                panel.setAttribute('hidden', '');
+                if (btn) { btn.setAttribute('aria-expanded', 'false'); btn.focus(); }
+            }
+        },
+
+        // Stepper control: − [value] + with live announce
+        _mkStepper: function (label, key, min, max, step, fmt) {
+            var self = this;
+            var row = document.createElement('div');
+            row.className = 'abr-col-row';
+            row.setAttribute('role', 'group');
+            row.setAttribute('aria-label', label);
+            var lab = document.createElement('span');
+            lab.className = 'abr-col-label';
+            lab.textContent = label;
+            var out = document.createElement('output');
+            out.className = 'abr-col-value';
+            out.textContent = fmt(self._ds[key]);
+            function mk(delta, name, icon) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'abr-col-step';
+                b.setAttribute('aria-label', name + ' ' + label);
+                b.innerHTML = '<span class="material-icons" aria-hidden="true">' + icon + '</span>';
+                b.addEventListener('click', function () {
+                    var v = Math.max(min, Math.min(max, self._ds[key] + delta));
+                    if (v === self._ds[key]) return;
+                    self._ds[key] = v;
+                    out.textContent = fmt(v);
+                    self._applyDisplaySettings();
+                });
+                return b;
+            }
+            row.appendChild(lab);
+            row.appendChild(mk(-step, 'Decrease', 'remove'));
+            row.appendChild(out);
+            row.appendChild(mk(step, 'Increase', 'add'));
+            return row;
+        },
+
+        // Radio-style row of choices (font, theme, alignment)
+        _mkChoices: function (label, key, options, onChange) {
+            var self = this;
+            var row = document.createElement('div');
+            row.className = 'abr-col-row';
+            row.setAttribute('role', 'radiogroup');
+            row.setAttribute('aria-label', label);
+            var lab = document.createElement('span');
+            lab.className = 'abr-col-label';
+            lab.textContent = label;
+            row.appendChild(lab);
+            options.forEach(function (opt) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'abr-col-choice';
+                b.setAttribute('role', 'radio');
+                b.setAttribute('aria-checked', self._ds[key] === opt.value ? 'true' : 'false');
+                b.dataset.value = opt.value;
+                b.textContent = opt.label;
+                if (opt.style) b.setAttribute('style', opt.style);
+                b.addEventListener('click', function () {
+                    self._ds[key] = opt.value;
+                    row.querySelectorAll('[role="radio"]').forEach(function (r) {
+                        r.setAttribute('aria-checked', r.dataset.value === opt.value ? 'true' : 'false');
+                    });
+                    if (onChange) onChange(opt.value);
+                    self._applyDisplaySettings();
+                });
+                row.appendChild(b);
+            });
+            return row;
+        },
+
+        _buildColophon: function () {
+            var self = this;
+            var panel = document.createElement('div');
+            panel.id = 'abr-colophon';
+            panel.setAttribute('role', 'group');
+            panel.setAttribute('aria-label', 'Display settings');
+            panel.setAttribute('hidden', '');
+
+            // Type
+            panel.appendChild(self._mkChoices('Font', 'FontFamily', [
+                { value: 'publisher', label: 'Book' },
+                { value: 'serif', label: 'Serif', style: 'font-family:Georgia,serif' },
+                { value: 'sans', label: 'Sans', style: 'font-family:system-ui,sans-serif' },
+                { value: 'opendyslexic', label: 'OpenDyslexic' }
+            ]));
+            panel.appendChild(self._mkStepper('Text size', 'FontSizePct', 70, 250, 10,
+                function (v) { return v + '%'; }));
+            panel.appendChild(self._mkStepper('Line spacing', 'LineHeightPct', 100, 250, 10,
+                function (v) { return (v / 100).toFixed(1); }));
+            panel.appendChild(self._mkStepper('Letter spacing', 'LetterSpacing', 0, 25, 1,
+                function (v) { return (v / 100).toFixed(2) + 'em'; }));
+            panel.appendChild(self._mkStepper('Word spacing', 'WordSpacing', 0, 50, 5,
+                function (v) { return (v / 100).toFixed(2) + 'em'; }));
+            panel.appendChild(self._mkStepper('Paragraph spacing', 'ParaSpacingPct', 100, 300, 25,
+                function (v) { return v + '%'; }));
+            panel.appendChild(self._mkStepper('Margins', 'MarginPct', 2, 20, 2,
+                function (v) { return v + '%'; }));
+            panel.appendChild(self._mkChoices('Alignment', 'Align', [
+                { value: 'left', label: 'Left' },
+                { value: 'justify', label: 'Justified' }
+            ]));
+
+            // Theme
+            panel.appendChild(self._mkChoices('Theme', 'Theme', [
+                { value: 'light', label: 'Light' },
+                { value: 'dark', label: 'Dark' },
+                { value: 'sepia', label: 'Sepia' },
+                { value: 'contrast', label: 'High contrast' },
+                { value: 'custom', label: 'Custom' }
+            ], function (v) { self._syncCustomRow(); }));
+
+            // Custom colors + live contrast readout
+            var custom = document.createElement('div');
+            custom.id = 'abr-col-custom';
+            custom.className = 'abr-col-row';
+            custom.setAttribute('role', 'group');
+            custom.setAttribute('aria-label', 'Custom colors');
+            function colorInput(label, key) {
+                var wrap = document.createElement('label');
+                wrap.className = 'abr-col-color';
+                var txt = document.createElement('span');
+                txt.textContent = label;
+                var inp = document.createElement('input');
+                inp.type = 'color';
+                inp.value = self._ds[key] || '#000000';
+                inp.setAttribute('aria-label', label);
+                inp.addEventListener('input', function () {
+                    self._ds[key] = inp.value;
+                    self._updateContrastReadout();
+                    self._applyDisplaySettings();
+                });
+                wrap.appendChild(txt);
+                wrap.appendChild(inp);
+                return wrap;
+            }
+            custom.appendChild(colorInput('Text color', 'CustomFg'));
+            custom.appendChild(colorInput('Background color', 'CustomBg'));
+            var ratio = document.createElement('span');
+            ratio.id = 'abr-contrast-readout';
+            ratio.setAttribute('role', 'status');
+            ratio.setAttribute('aria-live', 'polite');
+            custom.appendChild(ratio);
+            panel.appendChild(custom);
+
+            // Reduced motion
+            var motion = document.createElement('div');
+            motion.className = 'abr-col-row';
+            var motionBtn = document.createElement('button');
+            motionBtn.type = 'button';
+            motionBtn.className = 'abr-col-choice';
+            motionBtn.setAttribute('aria-pressed', self._ds.ReducedMotion ? 'true' : 'false');
+            motionBtn.textContent = 'Reduce motion';
+            motionBtn.addEventListener('click', function () {
+                self._ds.ReducedMotion = !self._ds.ReducedMotion;
+                motionBtn.setAttribute('aria-pressed', self._ds.ReducedMotion ? 'true' : 'false');
+                self._applyDisplaySettings();
+            });
+            motion.appendChild(motionBtn);
+            panel.appendChild(motion);
+
+            // Initial visibility/readout state
+            setTimeout(function () { self._syncCustomRow(); }, 0);
+            return panel;
+        },
+
+        _syncCustomRow: function () {
+            var row = document.getElementById('abr-col-custom');
+            if (!row) return;
+            if (this._ds.Theme === 'custom') row.removeAttribute('hidden');
+            else row.setAttribute('hidden', '');
+            this._updateContrastReadout();
+        },
+
+        _updateContrastReadout: function () {
+            var el = document.getElementById('abr-contrast-readout');
+            if (!el) return;
+            var r = this._contrastRatio(this._ds.CustomFg, this._ds.CustomBg);
+            if (r === null) { el.textContent = ''; return; }
+            var txt = 'Contrast ' + r.toFixed(1) + ':1';
+            if (r < 4.5) {
+                txt = '\u26a0 ' + txt + ' — below the 4.5:1 minimum for comfortable reading';
+                el.classList.add('abr-contrast-warn');
+            } else {
+                el.classList.remove('abr-contrast-warn');
+            }
+            el.textContent = txt;
+        },
+
+        // ── Theme & Typography Engine ────────────────────────────────────────
+
+        _themes: {
+            light:    { bg: '#fafaf7', fg: '#1a1a1a', link: '#0a5da8' },
+            dark:     { bg: '#121212', fg: '#e8e8e6', link: '#6cb2e8' },
+            sepia:    { bg: '#f4ecd8', fg: '#5b4636', link: '#7a4e2d' },
+            contrast: { bg: '#000000', fg: '#ffffff', link: '#ffff00' }
+        },
+
+        _activeColors: function () {
+            var ds = this._ds || this._dsDefaults;
+            if (ds.Theme === 'custom') {
+                return { bg: ds.CustomBg || '#fafaf7', fg: ds.CustomFg || '#1a1a1a', link: ds.CustomFg || '#0a5da8' };
+            }
+            return this._themes[ds.Theme] || this._themes.light;
+        },
+
+        // WCAG relative luminance + contrast ratio
+        _contrastRatio: function (hex1, hex2) {
+            function lum(hex) {
+                var m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+                if (!m) return null;
+                var n = parseInt(m[1], 16);
+                var c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(function (v) {
+                    v /= 255;
+                    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+                });
+                return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+            }
+            var l1 = lum(hex1), l2 = lum(hex2);
+            if (l1 === null || l2 === null) return null;
+            var hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+            return (hi + 0.05) / (lo + 0.05);
+        },
+
+        _fontStack: function () {
+            switch ((this._ds || this._dsDefaults).FontFamily) {
+                case 'serif': return 'Georgia, "Times New Roman", serif';
+                case 'sans': return 'system-ui, "Segoe UI", Roboto, Arial, sans-serif';
+                case 'opendyslexic': return '"OpenDyslexic", system-ui, sans-serif';
+                default: return null; // publisher: no override
+            }
+        },
+
+        // CSS injected into the chapter document for typography + theme
+        _readingCss: function () {
+            var ds = this._ds || this._dsDefaults;
+            var col = this._activeColors();
+            var css =
+                '@font-face{font-family:"OpenDyslexic";src:url("/A11yBookReader/font/OpenDyslexic-Regular.woff2") format("woff2");font-weight:normal;font-style:normal;font-display:swap;}' +
+                '@font-face{font-family:"OpenDyslexic";src:url("/A11yBookReader/font/OpenDyslexic-Bold.woff2") format("woff2");font-weight:bold;font-style:normal;font-display:swap;}' +
+                '@font-face{font-family:"OpenDyslexic";src:url("/A11yBookReader/font/OpenDyslexic-Italic.woff2") format("woff2");font-weight:normal;font-style:italic;font-display:swap;}' +
+                'html{background:' + col.bg + ' !important;}' +
+                'body{background:' + col.bg + ' !important;color:' + col.fg + ' !important;' +
+                'font-size:' + ds.FontSizePct + '% !important;}' +
+                'body *:not(#abr-hl-box){background-color:transparent !important;}' +
+                'body *{color:' + col.fg + ' !important;' +
+                'line-height:' + (ds.LineHeightPct / 100) + ' !important;' +
+                'letter-spacing:' + (ds.LetterSpacing / 100) + 'em !important;' +
+                'word-spacing:' + (ds.WordSpacing / 100) + 'em !important;' +
+                'text-align:' + (ds.Align === 'justify' ? 'justify' : 'left') + ' !important;}' +
+                'a, a *{color:' + col.link + ' !important;text-decoration:underline;}' +
+                'p{margin-top:' + (0.6 * ds.ParaSpacingPct / 100) + 'em !important;' +
+                'margin-bottom:' + (0.6 * ds.ParaSpacingPct / 100) + 'em !important;}';
+            var stack = this._fontStack();
+            if (stack) css += 'body, body *{font-family:' + stack + ' !important;}';
+            return css;
+        },
+
+        // Theme variables for the reader chrome (bars derive from the page)
+        _applyChromeTheme: function () {
+            var overlay = document.getElementById('abr-overlay');
+            if (!overlay) return;
+            var col = this._activeColors();
+            overlay.style.setProperty('--abr-page-bg', col.bg);
+            overlay.style.setProperty('--abr-page-fg', col.fg);
+            overlay.classList.add('abr-themed');
+            // In-app reduced-motion kills CSS transitions too, not just JS motion
+            overlay.classList.toggle('abr-reduce', !!this._reducedMotion);
+        },
+
+        // Re-apply everything after a settings change, holding the position
+        _applyDisplaySettings: function () {
+            this._reducedMotion = this._ds.ReducedMotion ||
+                !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+            this._applyChromeTheme();
+            var frame = document.getElementById('abr-frame');
+            if (!frame) return;
+            var keep = this._firstVisiblePara();
+            this._setupChapterView(frame);
+            if (keep !== null) this._goToPara(keep);
+            this._saveDisplaySettings();
         },
 
         // ── API Helpers ──────────────────────────────────────────────────────

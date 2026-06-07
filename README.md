@@ -4,10 +4,15 @@ An accessible EPUB reader plugin for Jellyfin, built for WCAG 2.2 A/AA: full key
 
 ## Features
 
-- In-browser EPUB reading with chapter navigation (reader-owned arrow keys)
-- Per-user reading position persistence — resume any book where you left off, on any device
-- Text-to-speech: server-side [Piper](https://github.com/rhasspy/piper) neural TTS with streaming playback and voice management, with browser/TV speech fallback
+- In-browser EPUB reading with paged and continuous-scroll modes (reader-owned arrow keys; tap zones, swipe, and buttons for every gesture)
+- Per-user reading position persistence (Readium-style locators) — resume any book where you left off, on any device; TTS resumes from the paragraph it was reading
+- Display settings ("colophon"): font picker incl. bundled OpenDyslexic (SIL OFL), size/line/letter/word/paragraph spacing, margins, alignment, light/dark/sepia/high-contrast themes plus custom colors with a live WCAG contrast readout — settings follow the user across devices
+- Bookmark-ribbon progress indicator, reading ruler, and a distraction-free immersive mode with an always-reachable exit
+- Text-to-speech: server-side [Piper](https://github.com/rhasspy/piper) neural TTS with streaming playback, synced word highlight in both view modes, and browser/TV speech fallback
+- WCAG 2.2 AA throughout — keyboard, TV-remote, and screen-reader first; no dimmed text; reduced motion honored (OS preference and in-app toggle)
 - Read button injected on book detail pages
+
+See `STANDARDS.md` for the standards this project follows (Readium locators, W3C Web Annotations, EPUB 3 nav, WCAG 2.2) and its deliberate deviations.
 
 ## Dependencies
 
