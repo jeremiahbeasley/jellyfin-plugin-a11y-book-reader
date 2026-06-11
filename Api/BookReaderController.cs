@@ -233,6 +233,97 @@ public class BookReaderController : ControllerBase
         return _annotations.Delete(userId.Value, itemId, id) ? NoContent() : NotFound();
     }
 
+    /// <summary>
+    /// Export the user's annotations for a book: W3C Web Annotation JSON-LD
+    /// (format=json, the interchange standard) or human-readable Markdown
+    /// (format=md). Served as a download.
+    /// </summary>
+    [HttpGet("annotations/{itemId}/export")]
+    public ActionResult ExportAnnotations(Guid itemId, [FromQuery] string format = "json")
+    {
+        var userId = GetUserId();
+        if (userId == null) return Unauthorized();
+        var list = _annotations.List(userId.Value, itemId)
+            .OrderBy(a => a.Target.Locations.Chapter)
+            .ThenBy(a => a.Target.Locations.Progression)
+            .ToList();
+        var title = _libraryManager.GetItemById(itemId)?.Name ?? itemId.ToString("N");
+
+        if (string.Equals(format, "md", StringComparison.OrdinalIgnoreCase))
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("# Annotations — ").AppendLine(title).AppendLine();
+            foreach (var a in list)
+            {
+                var pct = (int)Math.Round(a.Target.Locations.Progression * 100);
+                sb.Append("- **").Append(a.Type).Append("** (chapter ")
+                  .Append(a.Target.Locations.Chapter + 1).Append(", ").Append(pct).Append("%)");
+                var quote = a.Target.Text?.Highlight;
+                if (!string.IsNullOrEmpty(quote)) sb.Append(": “").Append(quote).Append('”');
+                sb.AppendLine();
+                if (!string.IsNullOrEmpty(a.Body)) sb.Append("  - ").AppendLine(a.Body!.Replace("\n", "\n    "));
+            }
+            return File(System.Text.Encoding.UTF8.GetBytes(sb.ToString()),
+                "text/markdown", SafeFileName(title) + "-annotations.md");
+        }
+
+        var motivations = new Dictionary<string, string>
+        {
+            ["bookmark"] = "bookmarking",
+            ["highlight"] = "highlighting",
+            ["note"] = "commenting",
+        };
+        var items = list.Select(a => new Dictionary<string, object?>
+        {
+            ["id"] = "urn:uuid:" + a.Id,
+            ["type"] = "Annotation",
+            ["motivation"] = motivations.TryGetValue(a.Type, out var m) ? m : "bookmarking",
+            ["created"] = a.Created.ToString("o"),
+            ["modified"] = a.Updated.ToString("o"),
+            ["body"] = string.IsNullOrEmpty(a.Body)
+                ? null
+                : new Dictionary<string, object?> { ["type"] = "TextualBody", ["value"] = a.Body, ["format"] = "text/plain" },
+            ["target"] = new Dictionary<string, object?>
+            {
+                ["source"] = a.Target.Href ?? itemId.ToString("N"),
+                ["selector"] = new object[]
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "TextQuoteSelector",
+                        ["exact"] = a.Target.Text?.Highlight ?? string.Empty,
+                        ["prefix"] = a.Target.Text?.Before,
+                        ["suffix"] = a.Target.Text?.After,
+                    },
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "FragmentSelector",
+                        ["value"] = "chapter=" + a.Target.Locations.Chapter +
+                            (a.Target.Locations.Position != null ? ";block=" + a.Target.Locations.Position : string.Empty),
+                    },
+                },
+            },
+        }).ToList();
+        var export = new Dictionary<string, object>
+        {
+            ["@context"] = "http://www.w3.org/ns/anno.jsonld",
+            ["type"] = "AnnotationCollection",
+            ["label"] = title + " — annotations",
+            ["total"] = items.Count,
+            ["items"] = items,
+        };
+        var json = System.Text.Json.JsonSerializer.Serialize(export,
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        return File(System.Text.Encoding.UTF8.GetBytes(json),
+            "application/ld+json", SafeFileName(title) + "-annotations.json");
+    }
+
+    private static string SafeFileName(string s)
+    {
+        foreach (var c in Path.GetInvalidFileNameChars()) s = s.Replace(c, '_');
+        return s;
+    }
+
     // ── Reader settings (cross-device, per user) ──────────────────────────────
 
     [HttpGet("settings")]

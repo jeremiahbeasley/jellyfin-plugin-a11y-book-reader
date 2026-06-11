@@ -1178,6 +1178,10 @@ if (typeof window.a11yBookReader === 'undefined') {
                     }, 200);
                 });
             }
+
+            // Highlights & notes: selection popover + persistent highlight paint
+            self._wireSelection(frame, doc);
+            self._paintAnnotations(frame);
         },
 
         _applyViewMode: function (frame, doc, style) {
@@ -1420,6 +1424,10 @@ if (typeof window.a11yBookReader === 'undefined') {
 
             this._scrollSections[index] = sec;
             this._wireSectionInteractions(doc, sec, index);
+            // New section resident: paint any of its highlights/notes, and make
+            // sure selection handlers exist on the stitched host document
+            var fr = document.getElementById('abr-frame');
+            if (fr) { this._wireSelection(fr, doc); this._paintAnnotations(fr); }
             return sec;
         },
 
@@ -1749,6 +1757,8 @@ if (typeof window.a11yBookReader === 'undefined') {
             // close the reader
             if (e.key === 'Escape' || e.key === 'GoBack' || e.key === 'BrowserBack') {
                 e.preventDefault();
+                var selPop = document.getElementById('abr-sel-pop');
+                if (selPop) { this._hideSelPopover(); return; }
                 var footnote = document.getElementById('abr-footnote');
                 if (footnote) {
                     footnote.remove();
@@ -1775,6 +1785,9 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (e.key === 'p' || e.key === 'P') { e.preventDefault(); this._toggleTts(); return; }
             // b = toggle a bookmark at the current position
             if (e.key === 'b' || e.key === 'B') { e.preventDefault(); this._toggleBookmark(); return; }
+            // h / n act on a pending text selection (set by the iframe handlers)
+            if ((e.key === 'h' || e.key === 'H') && this._pendingSel) { e.preventDefault(); this._createAnnotation('highlight', null); return; }
+            if ((e.key === 'n' || e.key === 'N') && this._pendingSel) { e.preventDefault(); this._openNoteEditor(); return; }
 
             // Reading keys while the book frame has focus: act on the content
             var frame = document.getElementById('abr-frame');
@@ -3244,7 +3257,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             tabs.className = 'abr-tablist';
             tabs.setAttribute('role', 'tablist');
             tabs.setAttribute('aria-label', 'Navigation sections');
-            var defs = [['toc', 'Contents'], ['bookmarks', 'Bookmarks'], ['search', 'Search'], ['pages', 'Pages'], ['landmarks', 'Landmarks'], ['goto', 'Go to']];
+            var defs = [['toc', 'Contents'], ['bookmarks', 'Annotations'], ['search', 'Search'], ['pages', 'Pages'], ['landmarks', 'Landmarks'], ['goto', 'Go to']];
             defs.forEach(function (t) {
                 var b = document.createElement('button');
                 b.type = 'button';
@@ -3352,42 +3365,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                 if (!self._nav.landmarks.length) body.textContent = 'This book has no landmarks.';
                 else renderTree(self._nav.landmarks, 0);
             } else if (tab === 'bookmarks') {
-                var bms = self._bookmarks();
-                if (!bms.length) {
-                    body.textContent = 'No bookmarks yet. Press B while reading to add one.';
-                } else {
-                    bms.forEach(function (b) {
-                        var row = document.createElement('div');
-                        row.className = 'abr-bm-row';
-                        var label = 'Chapter ' + (b.chapter + 1) + ' · ' + Math.round(b.fraction * 100) + '%' +
-                            (b.quote ? ' — ' + b.quote : '');
-                        var go = document.createElement('button');
-                        go.type = 'button';
-                        go.className = 'abr-map-item';
-                        go.textContent = label;
-                        go.addEventListener('click', function () {
-                            // Bookmarks restore an exact locator (fraction + para),
-                            // which jumpBtn's chapter+anchor path can't carry
-                            self._navStack.push(self._snapshotLocator());
-                            self._updateBackBtn();
-                            self._goToLocator(b);
-                            self._toggleBookMap();
-                            setTimeout(function () {
-                                var info = document.getElementById('abr-chapter-info');
-                                if (info) info.textContent = 'Jumped to bookmark';
-                            }, 150);
-                        });
-                        var del = document.createElement('button');
-                        del.type = 'button';
-                        del.className = 'abr-icon-btn abr-bm-del';
-                        del.setAttribute('aria-label', 'Delete bookmark: ' + label);
-                        del.innerHTML = '<span class="material-icons" aria-hidden="true">delete</span>';
-                        del.addEventListener('click', function () { self._deleteAnnotation(b, row); });
-                        row.appendChild(go);
-                        row.appendChild(del);
-                        body.appendChild(row);
-                    });
-                }
+                self._renderAnnotationsTab(body);
             } else if (tab === 'search') {
                 self._renderSearchTab(body);
             } else {
@@ -4379,6 +4357,8 @@ if (typeof window.a11yBookReader === 'undefined') {
             }).then(function (list) {
                 self._annotations = (list || []).map(self._normalizeAnnotation);
                 self._updateBookmarkBtn();
+                var fr = document.getElementById('abr-frame');
+                if (fr) self._paintAnnotations(fr);
             }).catch(function () {});
         },
 
@@ -4396,7 +4376,9 @@ if (typeof window.a11yBookReader === 'undefined') {
                 chapter: typeof loc.Chapter === 'number' ? loc.Chapter : (loc.chapter || 0),
                 fraction: typeof loc.Progression === 'number' ? loc.Progression : (loc.progression || 0),
                 para: (loc.Position != null) ? loc.Position : (loc.position != null ? loc.position : null),
-                quote: txt ? (txt.Highlight || txt.highlight || null) : null
+                quote: txt ? (txt.Highlight || txt.highlight || null) : null,
+                before: txt ? (txt.Before || txt.before || null) : null,
+                after: txt ? (txt.After || txt.after || null) : null
             };
         },
 
@@ -4487,21 +4469,20 @@ if (typeof window.a11yBookReader === 'undefined') {
             }).then(function () {
                 self._annotations = (self._annotations || []).filter(function (x) { return x.id !== a.id; });
                 self._updateBookmarkBtn();
+                var fr = document.getElementById('abr-frame');
+                if (fr) self._paintAnnotations(fr);
                 if (row && row.parentNode) {
                     var body = document.getElementById('abr-map-body');
-                    row.parentNode.removeChild(row);
+                    self._renderBookmarksIfOpen();
                     // The focused delete button just vanished — land focus on the
                     // tabpanel so keyboard/SR users aren't dropped to <body>
-                    if (body) {
-                        body.focus();
-                        if (!self._bookmarks().length) body.textContent = 'No bookmarks yet. Press B while reading to add one.';
-                    }
+                    if (body) body.focus();
                 }
                 var info = document.getElementById('abr-chapter-info');
-                if (info) info.textContent = 'Bookmark removed';
+                if (info) info.textContent = (a.type || 'bookmark') + ' removed';
             }).catch(function () {
                 var info = document.getElementById('abr-chapter-info');
-                if (info) info.textContent = 'Could not remove bookmark';
+                if (info) info.textContent = 'Could not remove ' + (a.type || 'bookmark');
             });
         },
 
@@ -4564,6 +4545,454 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (panel && !panel.hasAttribute('hidden') && this._bookMapTab === 'bookmarks') {
                 this._renderBookMapTab('bookmarks');
             }
+        },
+
+        // ── Highlights & notes (Phase 6 part 2) ──────────────────────────────
+        // Select text → popover (Highlight / Add note, or H / N). Anchored with
+        // a TextQuoteSelector (exact + prefix/suffix sliced from the block's
+        // raw textContent, so re-anchoring is a plain indexOf) plus the block
+        // index as the position selector. Painted with the CSS Custom Highlight
+        // API: ranges live-track layout, so there is no repaint-on-resize work.
+        // Browsers without the API just don't paint; the list still works.
+
+        _annColors: { yellow: '#ffe08a', green: '#b5e8a3', blue: '#aecbfa', pink: '#f8b8c8', orange: '#ffc28a' },
+
+        // Char offsets of a Range within a block, via a text-node walk. The end
+        // clamps to the block: a selection spanning paragraphs highlights its
+        // first paragraph's part.
+        _blockOffsets: function (block, range) {
+            var start = -1, end = -1, pos = 0;
+            var walker = block.ownerDocument.createTreeWalker(block, 4 /* TEXT */);
+            var n;
+            while ((n = walker.nextNode())) {
+                if (n === range.startContainer) start = pos + range.startOffset;
+                if (n === range.endContainer) { end = pos + range.endOffset; break; }
+                pos += n.textContent.length;
+            }
+            if (start < 0) return null;
+            if (end < 0) end = block.textContent.length;
+            return { start: start, end: Math.min(end, block.textContent.length) };
+        },
+
+        // Map block-relative char offsets back to a DOM Range.
+        _rangeFromBlock: function (doc, block, start, end) {
+            var range = doc.createRange();
+            var pos = 0, gotStart = false;
+            var walker = doc.createTreeWalker(block, 4 /* TEXT */);
+            var n;
+            while ((n = walker.nextNode())) {
+                var len = n.textContent.length;
+                if (!gotStart && start < pos + len) { range.setStart(n, start - pos); gotStart = true; }
+                if (gotStart && end <= pos + len) { range.setEnd(n, end - pos); return range; }
+                pos += len;
+            }
+            return null;
+        },
+
+        // Blocks + chapter for an element, view-mode aware (scroll mode scopes
+        // to the containing section; Position stays chapter-relative).
+        _blocksForEl: function (doc, el) {
+            if (this._viewMode === 'scroll') {
+                var sec = el.closest && el.closest('section.abr-ch');
+                if (!sec) return null;
+                return { chapter: parseInt(sec.getAttribute('data-ch'), 10), blocks: this._getBlocksIn(sec) };
+            }
+            return { chapter: this._chapterIndex, blocks: this._getBlocks(doc) };
+        },
+
+        _annFromSelection: function (doc, sel) {
+            try {
+                if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+                var range = sel.getRangeAt(0);
+                var node = range.startContainer;
+                var el = node.nodeType === 3 ? node.parentElement : node;
+                var ctx = this._blocksForEl(doc, el);
+                if (!ctx) return null;
+                var block = null, bi = -1;
+                for (var i = 0; i < ctx.blocks.length; i++) {
+                    if (ctx.blocks[i].contains(range.startContainer)) { block = ctx.blocks[i]; bi = i; break; }
+                }
+                if (!block) return null;
+                var offs = this._blockOffsets(block, range);
+                if (!offs || offs.end <= offs.start) return null;
+                var btext = block.textContent;
+                var exact = btext.slice(offs.start, Math.min(offs.end, offs.start + 300));
+                if (!exact.trim()) return null;
+                return {
+                    chapter: ctx.chapter,
+                    para: bi,
+                    fraction: ctx.blocks.length ? bi / ctx.blocks.length : 0,
+                    exact: exact,
+                    prefix: btext.slice(Math.max(0, offs.start - 40), offs.start),
+                    suffix: btext.slice(offs.end, offs.end + 40)
+                };
+            } catch (e) { return null; }
+        },
+
+        _wireSelection: function (frame, doc) {
+            var self = this;
+            if (!doc || doc.abrSelWired) return;
+            doc.abrSelWired = true;
+            var onUp = function () { setTimeout(function () { self._maybeShowSelPopover(frame, doc); }, 30); };
+            doc.addEventListener('mouseup', onUp);
+            doc.addEventListener('touchend', onUp);
+            // Keyboard selection (Shift+arrows / caret browsing)
+            doc.addEventListener('keyup', function (e) { if (e.key === 'Shift') onUp(); });
+            doc.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape' && document.getElementById('abr-sel-pop')) {
+                    e.preventDefault(); e.stopPropagation();
+                    self._hideSelPopover();
+                    return;
+                }
+                if (!self._pendingSel) return;
+                if (e.key === 'h' || e.key === 'H') { e.preventDefault(); self._createAnnotation('highlight', null); }
+                else if (e.key === 'n' || e.key === 'N') { e.preventDefault(); self._openNoteEditor(); }
+            });
+            doc.addEventListener('mousedown', function () { self._hideSelPopover(); });
+        },
+
+        _maybeShowSelPopover: function (frame, doc) {
+            var sel = doc.getSelection && doc.getSelection();
+            var payload = this._annFromSelection(doc, sel);
+            if (!payload) { this._hideSelPopover(); return; }
+            this._pendingSel = payload;
+            var rect = sel.getRangeAt(0).getBoundingClientRect();
+            this._showSelPopover(frame, rect);
+            var info = document.getElementById('abr-chapter-info');
+            if (info) info.textContent = 'Text selected. Press H to highlight, N to add a note.';
+        },
+
+        _showSelPopover: function (frame, rect) {
+            var self = this;
+            this._hideSelPopover(true);
+            var pop = document.createElement('div');
+            pop.id = 'abr-sel-pop';
+            pop.setAttribute('role', 'toolbar');
+            pop.setAttribute('aria-label', 'Selection actions');
+            var mk = function (label, fn) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'abr-col-choice';
+                b.textContent = label;
+                // mousedown would move focus and clear the iframe selection
+                b.addEventListener('mousedown', function (e) { e.preventDefault(); });
+                b.addEventListener('click', fn);
+                pop.appendChild(b);
+                return b;
+            };
+            mk('Highlight (H)', function () { self._createAnnotation('highlight', null); });
+            mk('Add note (N)', function () { self._openNoteEditor(); });
+            document.body.appendChild(pop);
+            var fr = frame.getBoundingClientRect();
+            var top = fr.top + rect.top - pop.offsetHeight - 8;
+            if (top < 4) top = fr.top + rect.bottom + 8;
+            var left = fr.left + rect.left + rect.width / 2 - pop.offsetWidth / 2;
+            left = Math.max(4, Math.min(left, window.innerWidth - pop.offsetWidth - 4));
+            pop.style.top = Math.max(4, top) + 'px';
+            pop.style.left = left + 'px';
+        },
+
+        _hideSelPopover: function (keepPending) {
+            var pop = document.getElementById('abr-sel-pop');
+            if (pop) pop.remove();
+            if (!keepPending) this._pendingSel = null;
+        },
+
+        _openNoteEditor: function () {
+            var self = this;
+            var pop = document.getElementById('abr-sel-pop');
+            if (!pop) return;
+            pop.innerHTML = '';
+            pop.setAttribute('role', 'dialog');
+            pop.setAttribute('aria-label', 'Add note');
+            var ta = document.createElement('textarea');
+            ta.className = 'abr-note-input';
+            ta.setAttribute('aria-label', 'Note text');
+            ta.rows = 3;
+            var save = document.createElement('button');
+            save.type = 'button';
+            save.className = 'abr-col-choice';
+            save.textContent = 'Save note';
+            save.addEventListener('click', function () { self._createAnnotation('note', ta.value); });
+            var cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = 'abr-col-choice';
+            cancel.textContent = 'Cancel';
+            cancel.addEventListener('click', function () { self._hideSelPopover(); });
+            pop.appendChild(ta);
+            pop.appendChild(save);
+            pop.appendChild(cancel);
+            ta.focus();
+        },
+
+        _createAnnotation: function (type, body) {
+            var self = this;
+            var p = self._pendingSel;
+            if (!p || !self._currentItemId) return;
+            var item = self._spine[p.chapter] || {};
+            var info = document.getElementById('abr-chapter-info');
+            ApiClient.ajax({
+                url: ApiClient.getUrl('A11yBookReader/annotations/' + self._currentItemId),
+                type: 'POST',
+                contentType: 'application/json',
+                dataType: 'json',
+                data: JSON.stringify({
+                    Type: type,
+                    Body: body || null,
+                    Color: type === 'note' ? 'blue' : 'yellow',
+                    Href: item.Href || item.href || null,
+                    Locations: {
+                        Chapter: p.chapter,
+                        Progression: p.fraction,
+                        TotalProgression: (p.chapter + p.fraction) / Math.max(1, self._spine.length),
+                        Position: p.para
+                    },
+                    Text: { Before: p.prefix, Highlight: p.exact, After: p.suffix }
+                })
+            }).then(function (created) {
+                self._annotations.push(self._normalizeAnnotation(created));
+                self._hideSelPopover();
+                var frame = document.getElementById('abr-frame');
+                if (frame) {
+                    try { frame.contentDocument.getSelection().removeAllRanges(); } catch (e) {}
+                    self._paintAnnotations(frame);
+                }
+                self._renderBookmarksIfOpen();
+                if (info) info.textContent = type === 'note' ? 'Note added' : 'Highlight added';
+            }).catch(function () {
+                if (info) info.textContent = 'Could not save ' + type;
+            });
+        },
+
+        // Repaint all highlight/note ranges for the resident content. One CSS
+        // Highlight registry per color; ranges are resolved block-first with a
+        // quote-search fallback (the block index can drift across re-extracts).
+        _paintAnnotations: function (frame) {
+            var self = this;
+            try {
+                var doc = frame && frame.contentDocument;
+                var win = frame && frame.contentWindow;
+                if (!doc || !doc.body || !win) return;
+                if (!win.CSS || !win.CSS.highlights || !win.Highlight) return;
+
+                var st = doc.getElementById('abr-ann-style');
+                if (!st) {
+                    st = doc.createElement('style');
+                    st.id = 'abr-ann-style';
+                    var css = '';
+                    for (var c in self._annColors) {
+                        css += '::highlight(abr-ann-' + c + '){background-color:' + self._annColors[c] + ';color:#1a1a1a;}';
+                    }
+                    st.textContent = css;
+                    doc.head.appendChild(st);
+                }
+
+                var regs = {};
+                for (var col in self._annColors) {
+                    var hl = new win.Highlight();
+                    regs[col] = hl;
+                    win.CSS.highlights.set('abr-ann-' + col, hl);
+                }
+
+                (self._annotations || []).forEach(function (a) {
+                    if (a.type !== 'highlight' && a.type !== 'note') return;
+                    if (!a.quote) return;
+                    var blocks;
+                    if (self._viewMode === 'scroll') {
+                        var sec = self._scrollSections && self._scrollSections[a.chapter];
+                        if (!sec) return;
+                        blocks = self._getBlocksIn(sec);
+                    } else {
+                        if (a.chapter !== self._chapterIndex) return;
+                        blocks = self._getBlocks(doc);
+                    }
+                    var block = (a.para != null) ? blocks[a.para] : null;
+                    var idx = -1;
+                    if (block) {
+                        var btext = block.textContent;
+                        if (a.before) {
+                            idx = btext.indexOf(a.before + a.quote);
+                            if (idx >= 0) idx += a.before.length;
+                        }
+                        if (idx < 0) idx = btext.indexOf(a.quote);
+                    }
+                    if (idx < 0) {
+                        // Position drifted: quote-search every block
+                        for (var b = 0; b < blocks.length; b++) {
+                            var k = blocks[b].textContent.indexOf(a.quote);
+                            if (k >= 0) { block = blocks[b]; idx = k; break; }
+                        }
+                    }
+                    if (!block || idx < 0) return;
+                    var range = self._rangeFromBlock(doc, block, idx, idx + a.quote.length);
+                    if (!range) return;
+                    var color = a.color || (a.type === 'note' ? 'blue' : 'yellow');
+                    (regs[color] || regs.yellow).add(range);
+                });
+            } catch (e) {}
+        },
+
+        // Annotations tab in the Book map: every annotation type with filter,
+        // search, jump-to, note editing, delete, and export (JSON-LD / Markdown).
+        _renderAnnotationsTab: function (body) {
+            var self = this;
+
+            // Controls row: type filter + text search + export
+            var controls = document.createElement('div');
+            controls.className = 'abr-ann-controls';
+            var filterLab = document.createElement('label');
+            filterLab.className = 'abr-col-label';
+            filterLab.textContent = 'Show';
+            var filter = document.createElement('select');
+            filter.id = 'abr-ann-filter';
+            filter.className = 'abr-rotor-select';
+            [['all', 'All'], ['bookmark', 'Bookmarks'], ['highlight', 'Highlights'], ['note', 'Notes']].forEach(function (o) {
+                var opt = document.createElement('option');
+                opt.value = o[0]; opt.textContent = o[1];
+                if ((self._annFilter || 'all') === o[0]) opt.selected = true;
+                filter.appendChild(opt);
+            });
+            filter.addEventListener('change', function () { self._annFilter = filter.value; self._renderBookMapTab('bookmarks'); });
+            filterLab.appendChild(filter);
+            var search = document.createElement('input');
+            search.id = 'abr-ann-search';
+            search.type = 'text';
+            search.className = 'abr-goto-input';
+            search.placeholder = 'Search annotations';
+            search.setAttribute('aria-label', 'Search annotations');
+            search.value = self._annSearch || '';
+            search.addEventListener('input', function () { self._annSearch = search.value; renderRows(); });
+            var mkExport = function (label, fmt) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'abr-col-choice';
+                b.textContent = label;
+                b.addEventListener('click', function () {
+                    var token = (typeof ApiClient !== 'undefined' && ApiClient.accessToken) ? ApiClient.accessToken() : '';
+                    var url = ApiClient.getUrl('A11yBookReader/annotations/' + self._currentItemId + '/export',
+                        token ? { format: fmt, api_key: token } : { format: fmt });
+                    var a = document.createElement('a');
+                    a.href = url; a.download = '';
+                    document.body.appendChild(a); a.click(); a.remove();
+                });
+                return b;
+            };
+            controls.appendChild(filterLab);
+            controls.appendChild(search);
+            controls.appendChild(mkExport('Export JSON', 'json'));
+            controls.appendChild(mkExport('Export Markdown', 'md'));
+            body.appendChild(controls);
+
+            var listWrap = document.createElement('div');
+            listWrap.id = 'abr-ann-list';
+            body.appendChild(listWrap);
+
+            var typeWord = { bookmark: 'Bookmark', highlight: 'Highlight', note: 'Note' };
+
+            function renderRows() {
+                listWrap.innerHTML = '';
+                var f = self._annFilter || 'all';
+                var q = (self._annSearch || '').toLowerCase();
+                var list = (self._annotations || []).slice()
+                    .filter(function (a) { return f === 'all' || a.type === f; })
+                    .filter(function (a) {
+                        if (!q) return true;
+                        return ((a.quote || '') + ' ' + (a.body || '')).toLowerCase().indexOf(q) >= 0;
+                    })
+                    .sort(function (x, y) { return (x.chapter - y.chapter) || (x.fraction - y.fraction); });
+                if (!list.length) {
+                    listWrap.textContent = q || f !== 'all'
+                        ? 'No matching annotations.'
+                        : 'Nothing yet. Press B to bookmark, or select text to highlight or add a note.';
+                    return;
+                }
+                list.forEach(function (a) {
+                    var row = document.createElement('div');
+                    row.className = 'abr-bm-row';
+                    var label = typeWord[a.type] + ' · Chapter ' + (a.chapter + 1) + ' · ' + Math.round(a.fraction * 100) + '%' +
+                        (a.quote ? ' — ' + a.quote : '');
+                    var go = document.createElement('button');
+                    go.type = 'button';
+                    go.className = 'abr-map-item';
+                    go.textContent = label;
+                    if (a.body) {
+                        var note = document.createElement('span');
+                        note.className = 'abr-ann-note';
+                        note.textContent = a.body;
+                        go.appendChild(note);
+                    }
+                    go.addEventListener('click', function () {
+                        // Exact locator restore (fraction + para) — jumpBtn's
+                        // chapter+anchor path can't carry it
+                        self._navStack.push(self._snapshotLocator());
+                        self._updateBackBtn();
+                        self._goToLocator(a);
+                        self._toggleBookMap();
+                        setTimeout(function () {
+                            var info = document.getElementById('abr-chapter-info');
+                            if (info) info.textContent = 'Jumped to ' + typeWord[a.type].toLowerCase();
+                        }, 150);
+                    });
+                    row.appendChild(go);
+                    if (a.type === 'note' || a.type === 'highlight') {
+                        var edit = document.createElement('button');
+                        edit.type = 'button';
+                        edit.className = 'abr-icon-btn abr-bm-del';
+                        edit.setAttribute('aria-label', 'Edit note: ' + label);
+                        edit.innerHTML = '<span class="material-icons" aria-hidden="true">edit</span>';
+                        edit.addEventListener('click', function () { editNote(a, row); });
+                        row.appendChild(edit);
+                    }
+                    var del = document.createElement('button');
+                    del.type = 'button';
+                    del.className = 'abr-icon-btn abr-bm-del';
+                    del.setAttribute('aria-label', 'Delete ' + typeWord[a.type].toLowerCase() + ': ' + label);
+                    del.innerHTML = '<span class="material-icons" aria-hidden="true">delete</span>';
+                    del.addEventListener('click', function () { self._deleteAnnotation(a, row); });
+                    row.appendChild(del);
+                    listWrap.appendChild(row);
+                });
+            }
+
+            function editNote(a, row) {
+                var ed = document.createElement('div');
+                ed.className = 'abr-ann-edit';
+                var ta = document.createElement('textarea');
+                ta.className = 'abr-note-input';
+                ta.setAttribute('aria-label', 'Note text');
+                ta.rows = 3;
+                ta.value = a.body || '';
+                var save = document.createElement('button');
+                save.type = 'button';
+                save.className = 'abr-col-choice';
+                save.textContent = 'Save';
+                save.addEventListener('click', function () {
+                    ApiClient.ajax({
+                        url: ApiClient.getUrl('A11yBookReader/annotations/' + self._currentItemId + '/' + a.id),
+                        type: 'POST',
+                        contentType: 'application/json',
+                        dataType: 'json',
+                        data: JSON.stringify({ Body: ta.value })
+                    }).then(function () {
+                        a.body = ta.value;
+                        renderRows();
+                        var info = document.getElementById('abr-chapter-info');
+                        if (info) info.textContent = 'Note saved';
+                    }).catch(function () {});
+                });
+                var cancel = document.createElement('button');
+                cancel.type = 'button';
+                cancel.className = 'abr-col-choice';
+                cancel.textContent = 'Cancel';
+                cancel.addEventListener('click', function () { renderRows(); });
+                ed.appendChild(ta);
+                ed.appendChild(save);
+                ed.appendChild(cancel);
+                row.replaceWith(ed);
+                ta.focus();
+            }
+
+            renderRows();
         },
 
         // Resolve a text quote to a block index (TextQuoteSelector-style):

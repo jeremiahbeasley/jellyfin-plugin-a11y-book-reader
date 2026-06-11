@@ -9,6 +9,7 @@ const SUITES = [
   ['TTS', './tests/tts'],
   ['Multi-book', './tests/multibook'],
   ['Scroll-follow', './tests/scroll-follow'],
+  ['Annotations', './tests/annotations'],
 ];
 
 (async () => {

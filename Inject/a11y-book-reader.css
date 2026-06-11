@@ -674,6 +674,57 @@
     cursor: default;
 }
 
+/* Selection popover: Highlight / Add note over the selected text */
+#abr-sel-pop {
+    position: fixed;
+    z-index: 2147483647;
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+    padding: 6px;
+    border-radius: 8px;
+    background: var(--abr-page-bg, #1a1a1a);
+    color: var(--abr-page-fg, #fff);
+    border: 2px solid color-mix(in srgb, var(--abr-page-fg, #fff) 30%, transparent);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.abr-note-input {
+    min-width: 220px;
+    min-height: 40px; /* WCAG 2.5.8 */
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid currentColor;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+}
+
+/* Annotations tab: controls row above the list */
+.abr-ann-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.abr-ann-note {
+    display: block;
+    opacity: 0.8;
+    font-size: 0.88em;
+    margin-top: 2px;
+    white-space: pre-wrap;
+}
+
+.abr-ann-edit {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: flex-start;
+    padding: 6px 0;
+}
+
 /* Bookmarks tab: jump button + delete button per row */
 .abr-bm-row {
     display: flex;
