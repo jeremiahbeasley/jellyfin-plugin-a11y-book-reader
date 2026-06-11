@@ -13,11 +13,13 @@ if (typeof window.a11yBookReader === 'undefined') {
         _pendingQuoteTerm: null,
         _ttsStartPara: null,   // restored Position: where Play resumes reading
         _ttsSaveTimer: null,   // 10s interval persisting the spoken position
+        _piperLastAbs: null,   // last highlighted abs char offset (Piper manifest)
+        _piperPoll: null,      // interval polling the timing manifest
         // Navigation (Phase 3 book map)
         _nav: null,            // {Toc, Landmarks, PageList} from the server
         _navStack: [],         // locators to return to after link/TOC jumps
         _pendingAnchor: null,  // fragment id to land on after a chapter load
-        // Display settings (Phase 2 colophon) — server-synced, cross-device
+        // Display settings — server-synced, cross-device
         _ds: null,
         _dsSaveTimer: null,
         _dsDefaults: {
@@ -25,11 +27,21 @@ if (typeof window.a11yBookReader === 'undefined') {
             LetterSpacing: 0, WordSpacing: 0, ParaSpacingPct: 100,
             MarginPct: 6, Align: 'left', Theme: 'light',
             CustomFg: '#1a1a1a', CustomBg: '#fafaf7',
-            ReducedMotion: false, ViewMode: 'scroll', Ruler: false, TtsRatePct: 100
+            HlBg: '#ffd700', HlFg: '#1a1a1a',
+            ReducedMotion: false, ViewMode: 'chapter', Ruler: false, TtsRatePct: 100,
+            NavUnit: 'chapter'
         },
         _scrollSaveTimer: null,
         // Reading view state (Phase 1)
-        _viewMode: 'scroll',     // 'paged' | 'scroll'
+        _viewMode: 'chapter',    // 'page' | 'chapter' | 'scroll' (full-book)
+        _navUnit: 'chapter',     // rotor: what Prev/Next jumps by
+        // 3-way view-mode cycle: page (CSS columns) → chapter (scroll one
+        // chapter, chapter-by-chapter) → scroll (full-book continuous) → page.
+        _modeMeta: {
+            page:    { icon: 'auto_stories', label: 'Page',    next: 'chapter' },
+            chapter: { icon: 'view_day',     label: 'Chapter', next: 'scroll' },
+            scroll:  { icon: 'view_stream',  label: 'Scroll',  next: 'page' }
+        },
         _page: 0,
         _pageCount: 1,
         _pageStep: 0,
@@ -206,7 +218,8 @@ if (typeof window.a11yBookReader === 'undefined') {
             // the user's view mode (cross-device)
             self._fetchDisplaySettings().then(function () {
                 var ds = self._ds;
-                self._viewMode = ds.ViewMode === 'paged' ? 'paged' : 'scroll';
+                self._viewMode = self._normalizeViewMode(ds.ViewMode);
+                self._navUnit = self._normalizeNavUnit(ds.NavUnit);
                 self._rulerOn = !!ds.Ruler;
                 self._ttsRate = (ds.TtsRatePct || 100) / 100;
                 self._reducedMotion = ds.ReducedMotion ||
@@ -235,18 +248,25 @@ if (typeof window.a11yBookReader === 'undefined') {
                     if (typeof fr !== 'number' || fr < 0 || fr > 1) fr = 0;
                     if (typeof pa !== 'number' || pa < 0) pa = null;
                     if (ch !== null && (ch > 0 || fr > 0 || pa !== null)) {
-                        self._pendingScrollFraction = fr;
-                        self._pendingPara = pa;
-                        self._pendingQuote = txt ? (txt.Highlight || txt.highlight || null) : null;
-                        self._loadChapter(ch);
+                        if (self._viewMode === 'scroll') {
+                            self._enterScrollMode(ch, pa, fr);
+                        } else {
+                            self._pendingScrollFraction = fr;
+                            self._pendingPara = pa;
+                            self._pendingQuote = txt ? (txt.Highlight || txt.highlight || null) : null;
+                            self._loadChapter(ch);
+                        }
                         // Prefix the live region so screen readers hear that this is a resume
                         var info = document.getElementById('abr-chapter-info');
                         if (info) info.textContent = 'Resuming at ' + info.textContent;
+                    } else if (self._viewMode === 'scroll') {
+                        self._enterScrollMode(0, null, 0);
                     } else {
                         self._loadChapter(0);
                     }
                 }).catch(function () {
-                    self._loadChapter(0);
+                    if (self._viewMode === 'scroll') self._enterScrollMode(0, null, 0);
+                    else self._loadChapter(0);
                 });
             }).catch(function () {
                 if (readBtn) {
@@ -337,7 +357,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             ttsBtn.setAttribute('aria-pressed', 'false');
             ttsBtn.innerHTML = '<span class="material-icons" aria-hidden="true">play_arrow</span>';
             ttsBtn.addEventListener('click', function () { self._toggleTts(); });
-            toolbar.appendChild(ttsBtn);
+            // ttsBtn / ttsStopBtn are placed in the bottom bar (audio cluster) below.
 
             var ttsStopBtn = document.createElement('button');
             ttsStopBtn.id = 'abr-tts-stop';
@@ -347,47 +367,20 @@ if (typeof window.a11yBookReader === 'undefined') {
             ttsStopBtn.setAttribute('hidden', '');
             ttsStopBtn.innerHTML = '<span class="material-icons" aria-hidden="true">stop</span>';
             ttsStopBtn.addEventListener('click', function () { self._stopTts(); });
-            toolbar.appendChild(ttsStopBtn);
 
-            var ttsSettingsBtn = document.createElement('button');
-            ttsSettingsBtn.id = 'abr-tts-settings-btn';
-            ttsSettingsBtn.type = 'button';
-            ttsSettingsBtn.className = 'abr-icon-btn';
-            ttsSettingsBtn.setAttribute('aria-label', 'Reading settings');
-            ttsSettingsBtn.setAttribute('aria-expanded', 'false');
-            ttsSettingsBtn.setAttribute('aria-controls', 'abr-tts-settings');
-            ttsSettingsBtn.innerHTML = '<span class="material-icons" aria-hidden="true">tune</span>';
-            ttsSettingsBtn.addEventListener('click', function () {
-                var panel = document.getElementById('abr-tts-settings');
-                var open = panel.hasAttribute('hidden');
-                if (open) { panel.removeAttribute('hidden'); ttsSettingsBtn.setAttribute('aria-expanded', 'true'); }
-                else { panel.setAttribute('hidden', ''); ttsSettingsBtn.setAttribute('aria-expanded', 'false'); }
-            });
-            toolbar.appendChild(ttsSettingsBtn);
-
-            // View mode toggle: paged vs continuous scroll
-            var modeBtn = document.createElement('button');
-            modeBtn.id = 'abr-mode-toggle';
-            modeBtn.type = 'button';
-            modeBtn.className = 'abr-icon-btn';
-            // Constant name + state (4.1.2): "Paged reading, pressed/not pressed"
-            modeBtn.setAttribute('aria-label', 'Paged reading');
-            modeBtn.setAttribute('aria-pressed', self._viewMode === 'paged' ? 'true' : 'false');
-            modeBtn.innerHTML = '<span class="material-icons" aria-hidden="true">' +
-                (self._viewMode === 'paged' ? 'auto_stories' : 'view_day') + '</span>';
-            modeBtn.addEventListener('click', function () { self._toggleViewMode(); });
-            toolbar.appendChild(modeBtn);
-
-            // Reading ruler toggle
-            var rulerBtn = document.createElement('button');
-            rulerBtn.id = 'abr-ruler-toggle';
-            rulerBtn.type = 'button';
-            rulerBtn.className = 'abr-icon-btn';
-            rulerBtn.setAttribute('aria-label', 'Reading ruler');
-            rulerBtn.setAttribute('aria-pressed', self._rulerOn ? 'true' : 'false');
-            rulerBtn.innerHTML = '<span class="material-icons" aria-hidden="true">horizontal_rule</span>';
-            rulerBtn.addEventListener('click', function () { self._toggleRuler(); });
-            toolbar.appendChild(rulerBtn);
+            // Settings — opens the tabbed modal (Text / Page / Audio / Color),
+            // which absorbs the old display-settings, TTS-settings, ruler, and
+            // view-mode controls. View mode now lives on the Page tab.
+            var settingsBtn = document.createElement('button');
+            settingsBtn.id = 'abr-settings-btn';
+            settingsBtn.type = 'button';
+            settingsBtn.className = 'abr-icon-btn';
+            settingsBtn.setAttribute('aria-label', 'Settings');
+            settingsBtn.setAttribute('aria-expanded', 'false');
+            settingsBtn.setAttribute('aria-controls', 'abr-settings');
+            settingsBtn.innerHTML = '<span class="material-icons" aria-hidden="true">settings</span>';
+            settingsBtn.addEventListener('click', function () { self._openSettingsModal(); });
+            toolbar.appendChild(settingsBtn);
 
             // Book map (TOC / pages / landmarks / go-to)
             var mapBtn = document.createElement('button');
@@ -412,18 +405,6 @@ if (typeof window.a11yBookReader === 'undefined') {
             backBtn.addEventListener('click', function () { self._goBack(); });
             toolbar.appendChild(backBtn);
 
-            // Display settings (colophon)
-            var colophonBtn = document.createElement('button');
-            colophonBtn.id = 'abr-colophon-btn';
-            colophonBtn.type = 'button';
-            colophonBtn.className = 'abr-icon-btn';
-            colophonBtn.setAttribute('aria-label', 'Display settings');
-            colophonBtn.setAttribute('aria-expanded', 'false');
-            colophonBtn.setAttribute('aria-controls', 'abr-colophon');
-            colophonBtn.innerHTML = '<span class="material-icons" aria-hidden="true">text_format</span>';
-            colophonBtn.addEventListener('click', function () { self._toggleColophon(); });
-            toolbar.appendChild(colophonBtn);
-
             // Immersive (distraction-reduced) mode toggle
             // An action, not a toggle: while "pressed" the toolbar is gone, so
             // aria-pressed could never be perceived (4.1.2)
@@ -436,6 +417,8 @@ if (typeof window.a11yBookReader === 'undefined') {
             immersiveBtn.addEventListener('click', function () { self._setImmersive(true); });
             toolbar.appendChild(immersiveBtn);
 
+            // Close lives pinned to the overlay's top-right (appended to the
+            // overlay below), NOT in the wrapping toolbar — always reachable.
             var closeBtn = document.createElement('button');
             closeBtn.id = 'abr-close';
             closeBtn.type = 'button';
@@ -446,123 +429,9 @@ if (typeof window.a11yBookReader === 'undefined') {
 
             toolbar.appendChild(titleEl);
             toolbar.appendChild(chapterInfo);
-            toolbar.appendChild(closeBtn);
 
-            // TTS settings panel
-            {
-                var settingsPanel = document.createElement('div');
-                settingsPanel.id = 'abr-tts-settings';
-                settingsPanel.setAttribute('hidden', '');
-                settingsPanel.setAttribute('aria-label', 'Reading settings');
-                settingsPanel.setAttribute('role', 'group');
-
-                // Speed
-                var speedGroup = document.createElement('div');
-                speedGroup.className = 'abr-settings-group';
-                var speedLabel = document.createElement('label');
-                speedLabel.setAttribute('for', 'abr-speed-select');
-                speedLabel.className = 'abr-settings-label';
-                speedLabel.textContent = 'Speed';
-                var speedSelect = document.createElement('select');
-                speedSelect.id = 'abr-speed-select';
-                speedSelect.className = 'abr-speed-select';
-                speedSelect.setAttribute('aria-label', 'Reading speed');
-                [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0].forEach(function (r) {
-                    var opt = document.createElement('option');
-                    opt.value = String(r);
-                    opt.textContent = r + '×';
-                    if (r === self._ttsRate) opt.selected = true;
-                    speedSelect.appendChild(opt);
-                });
-                speedSelect.addEventListener('change', function () {
-                    self._ttsRate = parseFloat(speedSelect.value);
-                    if (self._ds) { self._ds.TtsRatePct = Math.round(self._ttsRate * 100); self._saveDisplaySettings(); }
-                    if (self._ttsPlaying && !self._ttsPaused) {
-                        if (self._piperAudio) {
-                            // Speed is baked into the synthesis — restart the
-                            // stream from the current position at the new rate
-                            var dur = (isFinite(self._piperAudio.duration) && self._piperAudio.duration > 0)
-                                ? self._piperAudio.duration : self._piperAudio.abrEstDuration;
-                            var frac = dur ? Math.min(self._piperAudio.currentTime / dur, 1) : 0;
-                            var charLen = self._ttsFullText.length - self._ttsCharOffset;
-                            self._ttsCharOffset += Math.floor(frac * charLen);
-                            self._stopPiperTts();
-                            self._ttsPlaying = false;
-                            self._startTts();
-                        } else if (self._isTvVoice()) {
-                            self._stopTvTts();
-                            self._ttsPlaying = false;
-                            self._startTts();
-                        } else if (typeof window.speechSynthesis !== 'undefined') {
-                            self._ttsCharOffset += self._ttsLastBoundary;
-                            self._ttsLastBoundary = 0;
-                            window.speechSynthesis.cancel();
-                            self._ttsPlaying = false;
-                            self._ttsUtterance = null;
-                            self._startTts();
-                        }
-                    }
-                });
-                speedGroup.appendChild(speedLabel);
-                speedGroup.appendChild(speedSelect);
-
-                // Voice
-                var voiceGroup = document.createElement('div');
-                voiceGroup.className = 'abr-settings-group';
-                var voiceLabel = document.createElement('label');
-                voiceLabel.setAttribute('for', 'abr-voice-select');
-                voiceLabel.className = 'abr-settings-label';
-                voiceLabel.textContent = 'Voice';
-                var voiceSelect = document.createElement('select');
-                voiceSelect.id = 'abr-voice-select';
-                voiceSelect.className = 'abr-voice-select';
-                voiceSelect.addEventListener('change', function () {
-                    self._ttsVoiceURI = voiceSelect.value;
-                    self._saveSettings();
-                    if (!self._ttsPlaying && !self._ttsPaused) return;
-
-                    // Save the current chapter position before tearing down.
-                    // NOTE: a live MP3 stream reports a finite, *growing*
-                    // .duration (the buffered length), which pins
-                    // currentTime/duration near 1 — only the text-length
-                    // estimate is an honest clock here.
-                    if (self._piperAudio) {
-                        var a = self._piperAudio;
-                        var dur = a.abrEstDuration;
-                        var frac = dur ? Math.min(a.currentTime / dur, 1) : 0;
-                        if (a.abrCost) {
-                            self._ttsCharOffset += self._costToChar(a.abrCost, frac * a.abrCost[a.abrCost.length - 1]);
-                        } else {
-                            var charLen = self._ttsFullText.length - self._ttsCharOffset;
-                            self._ttsCharOffset += Math.floor(frac * charLen);
-                        }
-                    } else if (self._hlTicker && self._hlTickLast != null) {
-                        self._ttsCharOffset = self._hlTickLast;
-                    } else {
-                        self._ttsCharOffset += self._ttsLastBoundary;
-                    }
-                    self._ttsLastBoundary = 0;
-                    self._stopHlTicker();
-                    self._stopPiperTts();
-                    self._stopTvTts();
-                    if (typeof window.speechSynthesis !== 'undefined') window.speechSynthesis.cancel();
-                    self._ttsUtterance = null;
-
-                    if (self._ttsPlaying && !self._ttsPaused) {
-                        // Playing: restart immediately with the new voice
-                        self._ttsPlaying = false;
-                        self._startTts();
-                    }
-                    // Paused: stay paused — _toggleTts's resume path detects the
-                    // discarded stream and starts fresh with the new voice.
-                });
-                voiceGroup.appendChild(voiceLabel);
-                voiceGroup.appendChild(voiceSelect);
-
-                settingsPanel.appendChild(speedGroup);
-                settingsPanel.appendChild(voiceGroup);
-                overlay.appendChild(settingsPanel);
-            }
+            // (Audio voice/speed controls now live in the Settings modal's
+            // Audio tab — see _buildAudioControls.)
 
             // Chapter frame
             var contentArea = document.createElement('div');
@@ -615,8 +484,8 @@ if (typeof window.a11yBookReader === 'undefined') {
             prevBtn.type = 'button';
             prevBtn.className = 'abr-nav-btn';
             prevBtn.setAttribute('aria-label', 'Previous chapter');
-            prevBtn.innerHTML = '<span class="material-icons" aria-hidden="true">chevron_left</span> Previous';
-            prevBtn.addEventListener('click', function () { self._turn(-1); });
+            prevBtn.innerHTML = '<span class="material-icons" aria-hidden="true">chevron_left</span><span class="abr-nav-label"> Previous</span>';
+            prevBtn.addEventListener('click', function () { self._navStep(-1); });
 
             var chapterLabel = document.createElement('span');
             chapterLabel.id = 'abr-chapter-label';
@@ -627,28 +496,81 @@ if (typeof window.a11yBookReader === 'undefined') {
             pageInfo.id = 'abr-page-info';
             pageInfo.className = 'abr-chapter-label';
             // Page turns announce in paged mode; scrolling stays quiet
-            pageInfo.setAttribute('aria-live', self._viewMode === 'paged' ? 'polite' : 'off');
+            pageInfo.setAttribute('aria-live', self._viewMode === 'page' ? 'polite' : 'off');
 
             var nextBtn = document.createElement('button');
             nextBtn.id = 'abr-next';
             nextBtn.type = 'button';
             nextBtn.className = 'abr-nav-btn';
             nextBtn.setAttribute('aria-label', 'Next chapter');
-            nextBtn.innerHTML = 'Next <span class="material-icons" aria-hidden="true">chevron_right</span>';
-            nextBtn.addEventListener('click', function () { self._turn(1); });
+            nextBtn.innerHTML = '<span class="abr-nav-label">Next </span><span class="material-icons" aria-hidden="true">chevron_right</span>';
+            nextBtn.addEventListener('click', function () { self._navStep(1); });
 
             var mid = document.createElement('span');
             mid.className = 'abr-nav-mid';
             mid.appendChild(chapterLabel);
             mid.appendChild(pageInfo);
 
+            // Rotor: "Navigate by" — sets what Prev/Next jumps by. A wrapping
+            // <label> gives the select its accessible name (2.5.3 label-in-name);
+            // it wraps to its own row at narrow widths via CSS.
+            var rotorWrap = document.createElement('label');
+            rotorWrap.className = 'abr-rotor';
+            rotorWrap.id = 'abr-rotor';
+            var rotorText = document.createElement('span');
+            rotorText.className = 'abr-rotor-label';
+            rotorText.textContent = 'Navigate by';
+            var rotor = document.createElement('select');
+            rotor.id = 'abr-nav-unit';
+            rotor.className = 'abr-rotor-select';
+            rotor.setAttribute('aria-label', 'Navigate by');
+            [['chapter', 'Chapter'], ['page', 'Page'], ['heading', 'Heading'],
+             ['paragraph', 'Paragraph'], ['sentence', 'Sentence']].forEach(function (o) {
+                var opt = document.createElement('option');
+                opt.value = o[0]; opt.textContent = o[1];
+                if (o[0] === self._navUnit) opt.selected = true;
+                rotor.appendChild(opt);
+            });
+            rotor.addEventListener('change', function () { self._setNavUnit(rotor.value); });
+            rotorWrap.appendChild(rotorText);
+            rotorWrap.appendChild(rotor);
+            mid.appendChild(rotorWrap);
+
+            // Audio cluster (Bookshare-style): sentence skip-back · play/pause ·
+            // stop · sentence skip-ahead. ttsBtn/ttsStopBtn were created in the
+            // toolbar section and are relocated here. Skip uses the sentence
+            // navigator (seeks within a playing Piper stream when possible).
+            var audioCluster = document.createElement('span');
+            audioCluster.className = 'abr-audio-cluster';
+            var skipBack = document.createElement('button');
+            skipBack.id = 'abr-audio-back';
+            skipBack.type = 'button';
+            skipBack.className = 'abr-icon-btn';
+            skipBack.setAttribute('aria-label', 'Skip back one sentence');
+            skipBack.innerHTML = '<span class="material-icons" aria-hidden="true">fast_rewind</span>';
+            skipBack.addEventListener('click', function () { self._audioSkip(-1); });
+            var skipFwd = document.createElement('button');
+            skipFwd.id = 'abr-audio-fwd';
+            skipFwd.type = 'button';
+            skipFwd.className = 'abr-icon-btn';
+            skipFwd.setAttribute('aria-label', 'Skip ahead one sentence');
+            skipFwd.innerHTML = '<span class="material-icons" aria-hidden="true">fast_forward</span>';
+            skipFwd.addEventListener('click', function () { self._audioSkip(1); });
+            audioCluster.appendChild(skipBack);
+            audioCluster.appendChild(ttsBtn);
+            audioCluster.appendChild(ttsStopBtn);
+            audioCluster.appendChild(skipFwd);
+
             nav.appendChild(prevBtn);
             nav.appendChild(mid);
+            nav.appendChild(audioCluster);
             nav.appendChild(nextBtn);
+            self._updateNavUnitLabels(); // Prev/Next names reflect the saved unit
 
             overlay.appendChild(toolbar);
             overlay.appendChild(contentArea);
             overlay.appendChild(nav);
+            overlay.appendChild(closeBtn); // pinned top-right via CSS
 
             // Swipe on the chrome: page in paged mode, chapter in scroll mode
             var touchStartX = 0;
@@ -657,12 +579,12 @@ if (typeof window.a11yBookReader === 'undefined') {
             }, { passive: true });
             overlay.addEventListener('touchend', function (e) {
                 var dx = e.changedTouches[0].clientX - touchStartX;
-                if (Math.abs(dx) > 50) self._turn(dx < 0 ? 1 : -1);
+                if (Math.abs(dx) > 50) self._turnByPage(dx < 0 ? 1 : -1);
             });
 
-            // Colophon panel (display settings) — lives between toolbar and content
-            overlay.insertBefore(self._buildColophon(), contentArea);
-            // Book map panel
+            // Settings modal (tabbed: Text/Page/Audio/Color) + book-map panel,
+            // rendered under the menu bar.
+            overlay.insertBefore(self._buildSettingsModal(), contentArea);
             overlay.insertBefore(self._buildBookMap(), contentArea);
 
             document.body.appendChild(overlay);
@@ -699,6 +621,14 @@ if (typeof window.a11yBookReader === 'undefined') {
             self._ttsFullText = '';
             self._ttsLastBoundary = 0;
             self._ttsOffsetMap = [];
+            // Clear the start-hint and the periodic-save timer too: a stale
+            // hint from the OLD chapter would misplace the next read, and a
+            // leaked interval would keep firing. The resume-open path re-sets
+            // the hint in frame.onload after this load.
+            self._ttsStartPara = null;
+            self._piperLastAbs = null;
+            self._cssHl = null; // bound to the old iframe window; recreate for the new doc
+            if (self._ttsSaveTimer) { clearInterval(self._ttsSaveTimer); self._ttsSaveTimer = null; }
             self._clearTtsSelection(document.getElementById('abr-frame'));
 
             var spine = self._spine;
@@ -728,8 +658,12 @@ if (typeof window.a11yBookReader === 'undefined') {
             chapterInfo.textContent = label;
             chapterLabel.textContent = (self._chapterIndex + 1) + ' / ' + spine.length;
 
-            // Load chapter HTML into iframe
-            var src = '/A11yBookReader/chapter/' + self._currentItemId + '/' + self._chapterIndex;
+            // Load chapter HTML into iframe. An iframe src can't send auth
+            // headers, so pass the token as ?api_key= — the same pattern the
+            // TTS <audio> stream uses (the endpoint is no longer anonymous).
+            var token = (typeof ApiClient !== 'undefined' && ApiClient.accessToken) ? ApiClient.accessToken() : '';
+            var src = '/A11yBookReader/chapter/' + self._currentItemId + '/' + self._chapterIndex +
+                (token ? '?api_key=' + encodeURIComponent(token) : '');
 
             // Persist chapter turns immediately — but not when this load IS the
             // resume jump or a navigation jump (the pending anchor would be
@@ -754,21 +688,35 @@ if (typeof window.a11yBookReader === 'undefined') {
         },
 
         _navigateChapter: function (delta) {
-            this._enterAtEnd = (delta < 0 && this._viewMode === 'paged');
+            this._enterAtEnd = (delta < 0 && this._viewMode === 'page');
             this._loadChapter(this._chapterIndex + delta);
         },
 
         // ── Reading View Engine (Phase 1) ────────────────────────────────────
 
         // Unified turn: pages within the chapter first, chapters at the edges.
-        _turn: function (delta) {
+        // Page/viewport movement — used by swipe, tap zones, and keyboard
+        // arrows. The Prev/Next buttons go through _navStep (the rotor).
+        _turnByPage: function (delta) {
             // Deliberate navigation: Play now starts from where the user moved
             this._navResetTts();
+            // Full-book scroll: Prev/Next steps by a viewport; the lazy loader
+            // brings in chapter edges, so we never reload the frame here. (The
+            // rotor refines what a step means in Track 2.)
+            if (this._viewMode === 'scroll') {
+                try {
+                    var sw = document.getElementById('abr-frame').contentWindow;
+                    var sde = sw.document.documentElement;
+                    sw.scrollBy({ top: delta * sde.clientHeight * 0.9,
+                                  behavior: this._reducedMotion ? 'auto' : 'smooth' });
+                } catch (e) {}
+                return;
+            }
             // Book edges: nothing past the last page of the last chapter,
             // nothing before the first page of the first one.
             var atLastChapter = this._chapterIndex >= this._spine.length - 1;
             var atFirstChapter = this._chapterIndex <= 0;
-            if (this._viewMode === 'paged') {
+            if (this._viewMode === 'page') {
                 var target = this._page + delta;
                 if (target >= 0 && target < this._pageCount) { this._goToPage(target); return; }
                 if ((delta > 0 && atLastChapter) || (delta < 0 && atFirstChapter)) return;
@@ -788,6 +736,340 @@ if (typeof window.a11yBookReader === 'undefined') {
                 win.scrollBy({ top: delta * doc.clientHeight * 0.9,
                                behavior: this._reducedMotion ? 'auto' : 'smooth' });
             } catch (e) { this._navigateChapter(delta); }
+        },
+
+        // ── Rotor: Prev/Next by the selected unit ────────────────────────────
+        // The "Navigate by" select sets _navUnit; the Prev/Next buttons call
+        // _navStep, which jumps by that unit. Move inherits TTS state: if it was
+        // playing, it keeps reading from the new spot; if stopped, it stays
+        // silent (Play later starts there).
+        // ◀ Previous / Next ▶ : move by the VIEW MODE — Page→page, Chapter→chapter,
+        // Scroll→chapter. Read-aloud follows the new focus.
+        _navStep: function (delta) {
+            var wasPlaying = this._ttsPlaying || this._ttsContinuous;
+            var ch0 = this._chapterIndex;
+            if (this._viewMode === 'page') this._navByPage(delta);
+            else this._navByChapter(delta);            // chapter + scroll → by chapter
+            this._followAudio(wasPlaying, ch0);
+        },
+
+        // ⏪ / ⏩ : move by the ROTOR unit ("Navigate by"). Read-aloud follows.
+        _audioSkip: function (delta) {
+            var wasPlaying = this._ttsPlaying || this._ttsContinuous;
+            var ch0 = this._chapterIndex;
+            var selfHandled = false;
+            switch (this._navUnit) {
+                case 'page':      this._navByPage(delta); break;
+                case 'heading':   this._navByElement(delta, 'heading'); break;
+                case 'paragraph': this._navByElement(delta, 'paragraph'); break;
+                case 'sentence':  this._navBySentence(delta); selfHandled = true; break; // self-manages audio
+                case 'chapter':
+                default:          this._navByChapter(delta); break;
+            }
+            if (!selfHandled) this._followAudio(wasPlaying, ch0);
+        },
+
+        // Read-aloud follows the focus after any navigation. A chapter change
+        // resumes via _loadChapter's onload (so we just keep _ttsContinuous set);
+        // an in-chapter move restarts playback from the new position.
+        _followAudio: function (wasPlaying, ch0) {
+            if (!wasPlaying) return;
+            var self = this;
+            this._ttsContinuous = true;
+            // A page/chapter-mode chapter change reloads the frame and resumes via
+            // _loadChapter's onload; give that a moment, then start explicitly if
+            // it didn't (covers scroll-mode chapter moves, which don't reload, and
+            // any in-chapter move). The guard avoids a double-start.
+            var delay = (this._chapterIndex !== ch0) ? 700 : 220;
+            setTimeout(function () {
+                if (self._ttsPlaying) return;
+                self._ttsContinuous = true;
+                self._updateTtsButtons(true);
+                self._startTts();
+            }, delay);
+        },
+
+        _setNavUnit: function (unit) {
+            this._navUnit = this._normalizeNavUnit(unit);
+            if (this._ds) { this._ds.NavUnit = this._navUnit; this._saveDisplaySettings(); }
+            this._updateSkipLabels();
+            var info = document.getElementById('abr-chapter-info'); // polite live region
+            if (info) info.textContent = 'Skip by ' + this._navUnit;
+        },
+
+        // Prev/Next announce the view-mode unit; ⏪/⏩ announce the rotor unit.
+        _updateNavUnitLabels: function () {
+            this._updateNavStepLabels();
+            this._updateSkipLabels();
+        },
+        _updateNavStepLabels: function () {
+            var unit = this._viewMode === 'page' ? 'page' : 'chapter';
+            var prev = document.getElementById('abr-prev');
+            var next = document.getElementById('abr-next');
+            if (prev) prev.setAttribute('aria-label', 'Previous ' + unit);
+            if (next) next.setAttribute('aria-label', 'Next ' + unit);
+        },
+        _updateSkipLabels: function () {
+            var back = document.getElementById('abr-audio-back');
+            var fwd = document.getElementById('abr-audio-fwd');
+            if (back) back.setAttribute('aria-label', 'Skip back one ' + this._navUnit);
+            if (fwd) fwd.setAttribute('aria-label', 'Skip ahead one ' + this._navUnit);
+        },
+
+        // Dedicated page step (rotor=Page, and Prev/Next in Page view). Recomputes
+        // the live page count + current page from the RENDERED layout on every
+        // press, so a stale _page/_pageCount left behind by a view switch can't
+        // misfire a chapter jump — the "switching confuses it" class of bug. In
+        // non-page view modes a "page" is a viewport step, handled by _turnByPage.
+        _navByPage: function (delta) {
+            var frame = document.getElementById('abr-frame');
+            var doc = frame && frame.contentDocument;
+            if (!doc || !doc.body || this._viewMode !== 'page') return this._turnByPage(delta);
+            var w = this._pageStep || frame.clientWidth || 1;
+            // Use the cached _pageCount (computed at layout, before any transform —
+            // body.scrollWidth is unreliable once the body is translated). But take
+            // the CURRENT page from what's ACTUALLY rendered (the transform), so a
+            // stale _page from a view switch can't misfire a chapter jump.
+            var m = (doc.body.style.transform || '').match(/-?\d+(?:\.\d+)?/);
+            var curPage = m ? Math.round(Math.abs(parseFloat(m[0])) / w) : (this._page || 0);
+            this._page = Math.max(0, Math.min(curPage, this._pageCount - 1));
+            var target = this._page + delta;
+            if (target >= 0 && target < this._pageCount) { this._goToPage(target); return; }
+            // Genuine chapter edge → adjacent chapter's first/last page.
+            if (this._chapterIndex + delta >= 0 && this._chapterIndex + delta < this._spine.length) {
+                this._navResetTts();
+                this._enterAtEnd = (delta < 0);
+                this._navigateChapter(delta);
+            }
+        },
+
+        _navByChapter: function (delta) {
+            this._navResetTts();
+            var target = this._chapterIndex + delta;
+            if (target < 0 || target >= this._spine.length) return;
+            if (this._viewMode === 'scroll') {
+                this._chapterIndex = target;
+                this._scrollGoToAnchor(target, null);
+            } else {
+                this._navigateChapter(delta);
+            }
+            this._updateProgressUI();
+        },
+
+        // Block index whose text contains a given char offset (for cumulative
+        // element stepping).
+        _blockIndexOfOffset: function (offset) {
+            if (!offset) return null;
+            try {
+                var doc = document.getElementById('abr-frame').contentDocument;
+                var entry = this._findMapEntry(offset);
+                if (!entry) return null;
+                var blocks = this._getBlocks(doc);
+                for (var i = 0; i < blocks.length; i++) if (blocks[i].contains(entry.node)) return i;
+            } catch (e) {}
+            return null;
+        },
+
+        // Headings (h1–h6) or paragraph-level blocks, prev/next from the current
+        // reading position. Past the chapter's elements → adjacent chapter.
+        _navByElement: function (delta, kind) {
+            // Live spoken offset, captured BEFORE _navResetTts wipes TTS state, so
+            // a step while reading aloud starts from where the VOICE is (not the
+            // page top — that made it re-read the current paragraph).
+            var playingOff = (this._ttsPlaying && !this._ttsPaused)
+                ? (this._piperLastAbs != null ? this._piperLastAbs
+                   : (this._hlTickLast != null ? this._hlTickLast
+                      : this._ttsCharOffset + this._ttsLastBoundary))
+                : null;
+            this._navResetTts();
+            var frame = document.getElementById('abr-frame');
+            var doc = frame && frame.contentDocument;
+            if (!doc) return;
+            if (this._viewMode === 'scroll') return this._navByElementScroll(delta, kind, frame, doc);
+
+            this._ensureOffsetMap();
+            var blocks = this._getBlocks(doc);
+            // Advance from the last highlighted block so consecutive presses step
+            // forward/back, re-anchoring to the first visible block when the
+            // reader has moved ahead — same cumulative logic as sentence nav.
+            var visPara = this._firstVisiblePara(); if (visPara == null) visPara = 0;
+            var visOff = this._paraCharOffset(visPara) || 0;
+            var baseOff = (playingOff != null) ? playingOff
+                : ((delta > 0) ? Math.max(this._ttsCharOffset || 0, visOff)
+                               : (this._ttsCharOffset || visOff));
+            var cur = this._blockIndexOfOffset(baseOff);
+            if (cur == null) cur = visPara;
+            var hit = function (el) { return kind === 'paragraph' || /^H[1-6]$/.test(el.nodeName); };
+            var pick = null;
+            if (delta > 0) {
+                for (var i = cur + 1; i < blocks.length; i++) if (hit(blocks[i])) { pick = i; break; }
+            } else {
+                for (var j = cur - 1; j >= 0; j--) if (hit(blocks[j])) { pick = j; break; }
+            }
+            if (pick == null) {                 // past the chapter edge → adjacent chapter
+                if (this._chapterIndex + delta >= 0 && this._chapterIndex + delta < this._spine.length)
+                    this._navigateChapter(delta);
+                return;
+            }
+            // Highlight the target block — turns to its page in paged mode and
+            // marks it even when it's already on the current page (so the move
+            // is always visible). Also sets the Play-from point.
+            var off = this._paraCharOffset(pick);
+            this._ttsCharOffset = off;
+            this._revealHighlight(frame, off, Math.min((blocks[pick].textContent || '').length, 240));
+            this._updateProgressUI();
+        },
+
+        // Reveal + mark a target offset: highlight it (which turns to its page in
+        // paged mode) and scroll it into view in the scrolling modes. The shared
+        // "you moved here" feedback for every fine rotor unit.
+        _revealHighlight: function (frame, offset, length) {
+            this._ensureOffsetMap();
+            // Skip leading whitespace: many blocks start with "\n   " indentation,
+            // and a range over collapsed whitespace has a 0×0 rect, which makes
+            // _highlightWord bail and draw nothing. Start on the first visible char.
+            var txt = this._ttsFullText || '';
+            var end = Math.min(offset + (length || 1), txt.length);
+            while (offset < end && /\s/.test(txt.charAt(offset))) offset++;
+            if (length) length = Math.max(1, end - offset);
+            // Navigate to the target FIRST (turn to its page in paged mode via
+            // offsetLeft geometry, or scroll to it otherwise) so the highlight
+            // renders on-screen.
+            var node = this._nodeAtOffset(this._ttsOffsetMap, offset);
+            if (node) this._scrollNodeIntoView(frame, node);
+            this._highlightWord(frame, offset, Math.max(1, length || 1));
+        },
+
+        _navByElementScroll: function (delta, kind, frame, doc) {
+            var win = frame.contentWindow;
+            var root = doc.getElementById('abr-scroll-root');
+            if (!root) return;
+            var sel = kind === 'heading'
+                ? 'h1,h2,h3,h4,h5,h6'
+                : 'p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,figure,dt,dd';
+            var els = Array.prototype.slice.call(root.querySelectorAll(sel));
+            if (!els.length) return;
+            var cur = -1;
+            for (var i = 0; i < els.length; i++) {
+                if (els[i].getBoundingClientRect().top <= 4) cur = i; else break;
+            }
+            var target = cur + delta;
+            if (target < 0 || target >= els.length) { this._scrollMaybeLoadEdges(frame, doc); return; }
+            win.scrollTo(0, els[target].getBoundingClientRect().top + win.pageYOffset - 16);
+            this._updateProgressUI();
+        },
+
+        // Prev/Next sentence. Playing via Piper → seek the audio stream to the
+        // target sentence's manifest time (instant, no re-synthesis). Otherwise
+        // move the reading position to the sentence's character offset.
+        // Prev/next sentence. Re-synthesizes from the target sentence's char
+        // offset rather than seeking the audio: forward seeks on a progressive
+        // Piper stream are ignored, which made skip "just keep reading from where
+        // it was". Works for every voice. Playing → moves and keeps reading from
+        // the new sentence; stopped → repositions + highlights, stays silent.
+        _navBySentence: function (delta) {
+            var frame = document.getElementById('abr-frame');
+            if (!frame) return;
+            var wasPlaying = this._ttsPlaying && !this._ttsPaused;
+            var continuous = this._ttsContinuous;
+
+            // Scroll mode scopes the map to the ACTIVE section, which changes as
+            // you read, so it must be rebuilt each press. Page/chapter mode reads
+            // a stable single-chapter body whose map is cleared on chapter change
+            // (_ttsFullText = ''), so reuse the cached map instead of re-walking
+            // the whole DOM on every sentence press.
+            var built;
+            if (this._viewMode === 'scroll') {
+                built = this._buildOffsetMap(frame.contentDocument);
+                this._ttsOffsetMap = built.map;
+                this._ttsFullText = built.text;
+            } else {
+                this._ensureOffsetMap();
+                built = { map: this._ttsOffsetMap, text: this._ttsFullText };
+            }
+            if (!built.text) return;
+
+            // Current position. While playing: the live spoken offset. While
+            // stopped: BLOCK GEOMETRY (_firstVisiblePara uses offsetLeft, which
+            // is immune to the paged-mode CSS transform) — caretRangeFromPoint
+            // mis-reads that transform in some browsers and sent every skip to a
+            // consistent wrong spot. Consecutive skips keep advancing via
+            // _ttsCharOffset; re-anchor when the visible top moves past it.
+            var curOff;
+            if (wasPlaying) {
+                curOff = (this._piperLastAbs != null ? this._piperLastAbs
+                          : (this._hlTickLast != null ? this._hlTickLast
+                             : this._ttsCharOffset + this._ttsLastBoundary));
+            } else {
+                var geo = this._paraCharOffset(this._firstVisiblePara()) || 0;
+                curOff = (this._ttsCharOffset > geo) ? this._ttsCharOffset : geo;
+            }
+
+            var starts = this._sentenceStarts(built.text);
+            var ci = 0;
+            for (var k = 0; k < starts.length; k++) { if (starts[k] <= curOff) ci = k; else break; }
+            var rawTi = ci + delta;
+            if (rawTi < 0 || rawTi >= starts.length) {   // past the chapter edge → adjacent chapter
+                if (this._chapterIndex + delta >= 0 && this._chapterIndex + delta < this._spine.length) {
+                    if (wasPlaying) this._ttsContinuous = true; // keep reading into the next chapter
+                    this._navigateChapter(delta);
+                }
+                return;
+            }
+            var ti = rawTi;
+            var target = starts[ti];
+
+            // Tear current audio down cleanly, set the new start point
+            this._stopHlTicker();
+            this._stopPiperTts();
+            this._stopTvTts();
+            if (typeof window.speechSynthesis !== 'undefined') window.speechSynthesis.cancel();
+            this._ttsUtterance = null;
+            this._ttsLastBoundary = 0;
+            this._ttsCharOffset = target;
+            this._ttsPlaying = false;
+
+            // Visible feedback: highlight the target sentence (turns to its page
+            // in paged mode, scrolls to it in the scrolling modes).
+            var senEnd = (ti + 1 < starts.length ? starts[ti + 1] : built.text.length);
+            this._revealHighlight(frame, target, senEnd - target);
+
+            if (wasPlaying) {                    // move-and-keep-reading
+                this._ttsContinuous = continuous;
+                this._updateTtsButtons(true);
+                this._startTts();                // re-reads from the target sentence
+            }
+            this._updateProgressUI();
+        },
+
+        _sentenceStarts: function (text) {
+            var starts = [0];
+            var re = /[.!?]["'”’)\]]?\s+/g, m;
+            while ((m = re.exec(text)) !== null) {
+                var s = m.index + m[0].length;
+                if (s < text.length) starts.push(s);
+            }
+            return starts;
+        },
+
+        _nodeAtOffset: function (map, off) {
+            for (var i = 0; i < map.length; i++)
+                if (off >= map[i].absStart && off < map[i].absEnd) return map[i].node;
+            return map.length ? map[map.length - 1].node : null;
+        },
+
+        _scrollNodeIntoView: function (frame, node) {
+            try {
+                var el = node.nodeType === 3 ? node.parentElement : node;
+                if (!el) return;
+                if (this._viewMode === 'page') {
+                    this._goToPage(Math.max(0, Math.min(this._pageCount - 1,
+                        Math.round(el.offsetLeft / this._pageStep))), true);
+                } else {
+                    var win = frame.contentWindow;
+                    win.scrollTo(0, el.getBoundingClientRect().top + win.pageYOffset - 16);
+                }
+            } catch (e) {}
         },
 
         _setupChapterView: function (frame) {
@@ -850,8 +1132,8 @@ if (typeof window.a11yBookReader === 'undefined') {
                     // Middle-third tap toggles controls in BOTH modes (QA defect #3);
                     // side tap zones page-turn only in paged mode
                     if (x >= 0.33 && x <= 0.66) { self._setImmersive(!self._immersive); return; }
-                    if (self._viewMode !== 'paged') return;
-                    self._turn(x < 0.33 ? -1 : 1);
+                    if (self._viewMode !== 'page') return;
+                    self._turnByPage(x < 0.33 ? -1 : 1);
                 });
                 // Swipe inside the content
                 var sx = 0;
@@ -860,7 +1142,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                 }, { passive: true });
                 doc.addEventListener('touchend', function (e) {
                     var dx = e.changedTouches[0].clientX - sx;
-                    if (Math.abs(dx) > 50) self._turn(dx < 0 ? 1 : -1);
+                    if (Math.abs(dx) > 50) self._turnByPage(dx < 0 ? 1 : -1);
                 });
                 // Ruler tracks the pointer's reading line
                 doc.addEventListener('mousemove', function (e) {
@@ -893,7 +1175,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             var marginPx = Math.round(w * ds.MarginPct / 100);
             var reading = self._readingCss();
 
-            if (self._viewMode === 'paged') {
+            if (self._viewMode === 'page') {
                 style.textContent = reading +
                     'html{height:100%;overflow:hidden;}' +
                     // NOTE: no overflow:hidden on body — an element's overflow
@@ -951,11 +1233,14 @@ if (typeof window.a11yBookReader === 'undefined') {
         },
 
         // Ribbon fill + page readout + rich announce label
-        _updateProgressUI: function () {
+        // knownFraction: pass an already-computed scroll fraction to skip the
+        // _currentScrollFraction() recompute (which re-runs _scrollActiveInfo).
+        // The per-frame scroll tick passes it; other callers omit it.
+        _updateProgressUI: function (knownFraction) {
             var spineLen = Math.max(1, this._spine.length);
-            var within = this._viewMode === 'paged'
+            var within = this._viewMode === 'page'
                 ? (this._pageCount > 1 ? this._page / (this._pageCount - 1) : 1)
-                : this._currentScrollFraction();
+                : (knownFraction != null ? knownFraction : this._currentScrollFraction());
             var bookPct = Math.round(((this._chapterIndex + within) / spineLen) * 100);
 
             var fill = document.getElementById('abr-ribbon-fill');
@@ -964,7 +1249,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             var pageInfo = document.getElementById('abr-page-info');
             var ribbon = document.getElementById('abr-ribbon');
             var text, announce;
-            if (this._viewMode === 'paged') {
+            if (this._viewMode === 'page') {
                 var left = this._pageCount - 1 - this._page;
                 text = 'Page ' + (this._page + 1) + ' of ' + this._pageCount + ' · ' + bookPct + '%';
                 announce = 'Page ' + (this._page + 1) + ' of ' + this._pageCount +
@@ -981,75 +1266,431 @@ if (typeof window.a11yBookReader === 'undefined') {
             }
         },
 
-        _toggleViewMode: function () {
-            // Capture the reading position under the OUTGOING mode so the
-            // switch lands in the same place, not at the top (QA defect #1).
-            // The paragraph anchor survives the relayout; fraction is fallback.
+        // Cycle Page → Chapter → Scroll → Page. Page/Chapter relayout the
+        // current chapter frame in place; Scroll enters/leaves the full-book
+        // virtualized stitcher (see the Scroll engine section).
+        // Switch to a specific view mode, preserving the reading position.
+        // Shared by the (optional) toolbar cycle button and the Page-tab choice.
+        _setViewMode: function (next) {
+            var prev = this._viewMode;
+            if (!next || next === prev) return;
+            // Capture the reading position under the OUTGOING mode so the switch
+            // lands in the same place, not at the top (QA defect #1).
+            var keepChapter = this._chapterIndex;
             var keepPara = this._firstVisiblePara();
             var keep = this._currentScrollFraction();
-            this._viewMode = this._viewMode === 'paged' ? 'scroll' : 'paged';
-            this._pendingScrollFraction = keep;
-            if (this._ds) { this._ds.ViewMode = this._viewMode; this._saveDisplaySettings(); }
-            var btn = document.getElementById('abr-mode-toggle');
-            if (btn) {
-                btn.setAttribute('aria-pressed', this._viewMode === 'paged' ? 'true' : 'false');
-                btn.innerHTML = '<span class="material-icons" aria-hidden="true">' +
-                    (this._viewMode === 'paged' ? 'auto_stories' : 'view_day') + '</span>';
+
+            this._viewMode = next;
+            if (this._ds) { this._ds.ViewMode = next; this._saveDisplaySettings(); }
+            this._announceViewMode(next);
+            this._syncViewModeChoice();     // keep the Page-tab radios in sync
+            this._updateNavStepLabels();    // Prev/Next announce page vs chapter
+
+            if (next === 'scroll') {
+                this._enterScrollMode(keepChapter, keepPara, keep);
+            } else if (prev === 'scroll') {
+                this._exitScrollMode(keepChapter, keepPara, keep);
+            } else {
+                this._relayoutChapter(keepPara, keep);
             }
-            var frame = document.getElementById('abr-frame');
-            if (frame) {
-                this._setupChapterView(frame);
-                // Consume the carried position now — no frame reload happens here.
-                // Paragraph anchor first; fraction only if it fails.
-                var f = this._pendingScrollFraction;
-                this._pendingScrollFraction = null;
-                if (!this._goToPara(keepPara) && f !== null) {
-                    if (this._viewMode === 'paged') {
-                        this._goToPage(Math.round(f * (this._pageCount - 1)), true);
-                    } else {
-                        try {
-                            var win = frame.contentWindow, doc = win.document.documentElement;
-                            var max = doc.scrollHeight - doc.clientHeight;
-                            if (max > 0) win.scrollTo(0, f * max);
-                        } catch (e) {}
-                        this._updateProgressUI();
-                    }
-                }
-            }
-            // pageInfo announces page turns in paged mode; stays quiet while scrolling
+
             var pageInfo = document.getElementById('abr-page-info');
-            if (pageInfo) pageInfo.setAttribute('aria-live',
-                this._viewMode === 'paged' ? 'polite' : 'off');
-            var info = document.getElementById('abr-chapter-info');
-            if (info) info.textContent = this._viewMode === 'paged'
-                ? 'Paged reading' : 'Continuous scroll';
+            if (pageInfo) pageInfo.setAttribute('aria-live', next === 'page' ? 'polite' : 'off');
         },
 
-        _toggleRuler: function () {
-            this._rulerOn = !this._rulerOn;
-            if (this._ds) { this._ds.Ruler = this._rulerOn; this._saveDisplaySettings(); }
-            var btn = document.getElementById('abr-ruler-toggle');
-            if (btn) btn.setAttribute('aria-pressed', this._rulerOn ? 'true' : 'false');
-            var ruler = document.getElementById('abr-ruler');
-            if (ruler) {
-                if (this._rulerOn) {
-                    ruler.removeAttribute('hidden');
-                    // Keyboard/remote default: fixed reading line at 38% height
-                    var area = document.getElementById('abr-content-area');
-                    if (area) ruler.style.top = (area.getBoundingClientRect().top +
-                        area.clientHeight * 0.38) + 'px';
+        _syncViewModeChoice: function () {
+            var grp = document.getElementById('abr-viewmode-choice');
+            if (!grp) return;
+            var self = this;
+            grp.querySelectorAll('[role="radio"]').forEach(function (r) {
+                var on = r.dataset.value === self._viewMode;
+                r.setAttribute('aria-checked', on ? 'true' : 'false');
+                r.tabIndex = on ? 0 : -1; // keep the roving Tab stop on the selection
+            });
+        },
+
+        _announceViewMode: function (mode) {
+            var m = this._modeMeta[mode] || this._modeMeta.chapter;
+            var info = document.getElementById('abr-chapter-info'); // polite live region
+            if (info) info.textContent = 'View mode: ' + m.label;
+        },
+
+        // Relayout the current single chapter in place (page ↔ chapter switch),
+        // restoring the captured reading position.
+        _relayoutChapter: function (keepPara, keep) {
+            var frame = document.getElementById('abr-frame');
+            if (!frame) return;
+            this._setupChapterView(frame);
+            this._pendingScrollFraction = null;
+            if (!this._goToPara(keepPara) && keep !== null) {
+                if (this._viewMode === 'page') {
+                    this._goToPage(Math.round(keep * (this._pageCount - 1)), true);
                 } else {
-                    ruler.setAttribute('hidden', '');
+                    try {
+                        var win = frame.contentWindow, doc = win.document.documentElement;
+                        var max = doc.scrollHeight - doc.clientHeight;
+                        if (max > 0) win.scrollTo(0, keep * max);
+                    } catch (e) {}
+                    this._updateProgressUI();
                 }
             }
+        },
+
+        // ── Scroll engine: full-book continuous reading (virtualized) ────────
+        // One host document inside #abr-frame holds a moving window of chapters
+        // as <section class="abr-ch" data-ch="i"> blocks. Chapters load lazily
+        // as the reader nears an edge and far ones drop, so memory stays bounded
+        // on any book size. Positions stay per-chapter (Readium locator) by
+        // reading the active section's data-ch + the block index within it.
+
+        _scrollWindow: 1,    // chapters kept loaded on each side of the active one
+        _scrollBusy: false,  // guards against overlapping lazy loads
+        _scrollSections: null,
+
+        // Fetch one chapter's server-rendered HTML (full document, URLs already
+        // absolute) and return its body content + hoistable head styles.
+        _fetchChapterParts: function (index) {
+            var self = this;
+            var url = ApiClient.getUrl('A11yBookReader/chapter/' + self._currentItemId + '/' + index);
+            return ApiClient.ajax({ url: url, type: 'GET', dataType: 'text' }).then(function (htmlText) {
+                var parsed = new DOMParser().parseFromString(htmlText, 'text/html');
+                var heads = [];
+                // Hoist linked + inline stylesheets so chapter styling survives
+                // the move into the shared host document (deduped by key).
+                parsed.querySelectorAll('head link[rel~="stylesheet"], head style').forEach(function (n) {
+                    heads.push(n.tagName === 'LINK'
+                        ? { type: 'link', key: n.getAttribute('href') || '', href: n.getAttribute('href') }
+                        : { type: 'style', key: n.textContent, css: n.textContent });
+                });
+                return { body: parsed.body ? parsed.body.innerHTML : '', heads: heads };
+            });
+        },
+
+        // Inject (or replace) the section for chapter `index` at the right
+        // ordinal position so sections stay in spine order. Returns the element.
+        _stitchSection: function (doc, index, parts) {
+            var root = doc.getElementById('abr-scroll-root');
+            if (!root || this._scrollSections[index]) return this._scrollSections[index];
+            var sec = doc.createElement('section');
+            sec.className = 'abr-ch';
+            sec.setAttribute('data-ch', String(index));
+            var ch = this._spine[index];
+            sec.setAttribute('aria-label', 'Chapter ' + (index + 1) +
+                (ch && ch.title ? ': ' + ch.title : ''));
+            sec.innerHTML = parts.body;
+
+            // Hoist this chapter's head styles into the host head, once each
+            var hostHead = doc.getElementById('abr-host-style');
+            for (var i = 0; i < parts.heads.length; i++) {
+                var h = parts.heads[i];
+                if (this._scrollHeads[h.key]) continue;
+                this._scrollHeads[h.key] = true;
+                if (h.type === 'link') {
+                    var lnk = doc.createElement('link');
+                    lnk.rel = 'stylesheet'; lnk.href = h.href;
+                    doc.head.insertBefore(lnk, hostHead);
+                } else {
+                    var st = doc.createElement('style');
+                    st.textContent = h.css;
+                    doc.head.insertBefore(st, hostHead);
+                }
+            }
+
+            // Insert in spine order relative to already-loaded sections
+            var after = null, before = null, k;
+            for (k = index - 1; k >= 0; k--) { if (this._scrollSections[k]) { after = this._scrollSections[k]; break; } }
+            if (!after) for (k = index + 1; k < this._spine.length; k++) { if (this._scrollSections[k]) { before = this._scrollSections[k]; break; } }
+            if (after) root.insertBefore(sec, after.nextSibling);
+            else if (before) root.insertBefore(sec, before);
+            else root.appendChild(sec);
+
+            this._scrollSections[index] = sec;
+            this._wireSectionInteractions(doc, sec, index);
+            return sec;
+        },
+
+        _enterScrollMode: function (chapterIndex, keepPara, keepFraction) {
+            var self = this;
+            var frame = document.getElementById('abr-frame');
+            if (!frame) return;
+            // Tear down per-chapter TTS/highlight bound to the outgoing doc
+            self._navResetTts();
+            self._scrollHeads = {};
+            self._scrollSections = {};
+
+            // Build a fresh host document in the same iframe
+            frame.removeAttribute('src');
+            var doc = frame.contentDocument;
+            doc.open();
+            doc.write('<!DOCTYPE html><html><head><meta charset="utf-8">' +
+                '<style id="abr-view-style"></style><style id="abr-host-style"></style>' +
+                '</head><body><div id="abr-scroll-root"></div></body></html>');
+            doc.close();
+            self._applyScrollHostStyle(frame, doc);
+
+            self._chapterIndex = chapterIndex;
+            // Active chapter first so the reader can land immediately…
+            self._fetchChapterParts(chapterIndex).then(function (parts) {
+                self._stitchSection(doc, chapterIndex, parts);
+                // Land on the captured position within the active section
+                if (!self._scrollGoToPara(chapterIndex, keepPara) && keepFraction != null) {
+                    self._scrollToSectionFraction(chapterIndex, keepFraction);
+                }
+                self._wireScrollHandlers(frame, doc);
+                self._updateProgressUI();
+                // …then pull in the neighbors to fill the window
+                self._scrollEnsureWindow();
+            }).catch(function () {});
+        },
+
+        _exitScrollMode: function (chapterIndex, keepPara, keepFraction) {
+            // Detach scroll handlers, then reload the captured chapter as a
+            // normal single-chapter document for page/chapter mode.
+            var frame = document.getElementById('abr-frame');
+            if (frame && this._scrollHandler) {
+                try { frame.contentWindow.removeEventListener('scroll', this._scrollHandler); } catch (e) {}
+            }
+            this._scrollHandler = null;
+            this._scrollSections = null;
+            this._scrollHeads = null;
+            // _loadChapter resets the frame to /chapter/{id}/{index}; carry the
+            // paragraph anchor so we land where we were.
+            this._pendingPara = keepPara;
+            this._loadChapter(chapterIndex);
+        },
+
+        _applyScrollHostStyle: function (frame, doc) {
+            var ds = this._ds || this._dsDefaults;
+            var marginPx = Math.round(frame.clientWidth * ds.MarginPct / 100);
+            var style = doc.getElementById('abr-view-style');
+            if (style) style.textContent = this._readingCss() +
+                'html{overflow-y:auto;}' +
+                'body{margin:0;padding:24px ' + marginPx + 'px;column-width:auto;transform:none;}' +
+                '.abr-ch + .abr-ch{margin-top:2.5em;padding-top:2.5em;border-top:2px solid currentColor;}' +
+                'img,svg,video{max-width:100%;}';
+            if (this._applyChromeTheme) this._applyChromeTheme();
+        },
+
+        _getBlocksIn: function (el) {
+            return el.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, figure, dt, dd');
+        },
+
+        // The active chapter is the first section still substantially in view at
+        // the top; the para is the block index WITHIN that section (so positions
+        // stay per-chapter for the Readium locator).
+        _scrollActiveInfo: function (doc) {
+            if (!this._scrollSections) return null;
+            var sections = doc.querySelectorAll('section.abr-ch');
+            if (!sections.length) return null;
+            var vh = doc.documentElement.clientHeight;
+            var active = null;
+            for (var i = 0; i < sections.length; i++) {
+                var r = sections[i].getBoundingClientRect();
+                if (r.bottom > vh * 0.2) { active = sections[i]; break; }
+            }
+            if (!active) active = sections[sections.length - 1];
+            var chapter = parseInt(active.getAttribute('data-ch'), 10);
+            var blocks = this._getBlocksIn(active);
+            var para = 0;
+            for (var b = 0; b < blocks.length; b++) {
+                var br = blocks[b].getBoundingClientRect();
+                if (br.bottom > 0 && br.top < vh) { para = b; break; }
+            }
+            return { chapter: chapter, para: para, section: active };
+        },
+
+        _sectionFraction: function (section) {
+            var win = document.getElementById('abr-frame').contentWindow;
+            var top = section.getBoundingClientRect().top + win.pageYOffset;
+            var into = win.pageYOffset - top;
+            return Math.max(0, Math.min(1, into / (section.offsetHeight || 1)));
+        },
+
+        _scrollGoToPara: function (chapterIndex, para) {
+            var sec = this._scrollSections && this._scrollSections[chapterIndex];
+            if (!sec || para == null) return false;
+            var blocks = this._getBlocksIn(sec);
+            if (para < 0 || para >= blocks.length) return false;
+            var win = document.getElementById('abr-frame').contentWindow;
+            win.scrollTo(0, blocks[para].getBoundingClientRect().top + win.pageYOffset - 16);
+            return true;
+        },
+
+        _scrollToSectionFraction: function (chapterIndex, frac) {
+            var sec = this._scrollSections && this._scrollSections[chapterIndex];
+            if (!sec) return;
+            var win = document.getElementById('abr-frame').contentWindow;
+            var top = sec.getBoundingClientRect().top + win.pageYOffset;
+            win.scrollTo(0, top + frac * sec.offsetHeight - 16);
+        },
+
+        // Jump to an element id in scroll mode, loading its chapter section
+        // first if it isn't resident yet. id === null scrolls to section top.
+        _scrollGoToAnchor: function (chapterIndex, id) {
+            var self = this;
+            var doc = document.getElementById('abr-frame').contentDocument;
+            var go = function () {
+                var sec = self._scrollSections[chapterIndex];
+                if (!sec) return false;
+                var el = id ? sec.querySelector('#' + (window.CSS && CSS.escape ? CSS.escape(id) : id)) : sec;
+                if (!el) return false;
+                var win = doc.defaultView;
+                win.scrollTo(0, el.getBoundingClientRect().top + win.pageYOffset - 16);
+                return true;
+            };
+            if (go()) return;
+            this._scrollQueueLoad(doc, chapterIndex);
+            var tries = 0;
+            var iv = setInterval(function () { if (go() || ++tries > 20) clearInterval(iv); }, 100);
+        },
+
+        _wireScrollHandlers: function (frame, doc) {
+            var self = this;
+            var win = frame.contentWindow;
+            if (self._scrollHandler) { try { win.removeEventListener('scroll', self._scrollHandler); } catch (e) {} }
+            self._scrollHandler = function () {
+                if (self._scrollRaf) return;
+                self._scrollRaf = win.requestAnimationFrame(function () {
+                    self._scrollRaf = 0;
+                    self._onScrollTick(frame, doc);
+                });
+            };
+            win.addEventListener('scroll', self._scrollHandler, { passive: true });
+        },
+
+        _onScrollTick: function (frame, doc) {
+            var info = this._scrollActiveInfo(doc);
+            // Compute the section fraction once and reuse it for both the saved
+            // progress and the progress UI — _updateProgressUI would otherwise
+            // re-derive it via _currentScrollFraction → a second _scrollActiveInfo
+            // (the redundant layout pass that caused scroll jank).
+            var frac = null;
+            if (info) {
+                this._chapterIndex = info.chapter;
+                frac = this._sectionFraction(info.section);
+                this._saveProgress(info.chapter, frac, info.para);
+            }
+            this._updateProgressUI(frac);
+            this._scrollMaybeLoadEdges(frame, doc);
+        },
+
+        _scrollMaybeLoadEdges: function (frame, doc) {
+            var win = frame.contentWindow, de = doc.documentElement;
+            var loaded = Object.keys(this._scrollSections).map(Number).sort(function (a, b) { return a - b; });
+            if (!loaded.length) return;
+            var lo = loaded[0], hi = loaded[loaded.length - 1];
+            if (win.pageYOffset + de.clientHeight > de.scrollHeight - de.clientHeight && hi < this._spine.length - 1)
+                this._scrollQueueLoad(doc, hi + 1);
+            if (win.pageYOffset < de.clientHeight && lo > 0)
+                this._scrollQueueLoad(doc, lo - 1);
+            this._scrollTrimWindow(doc);
+        },
+
+        // Serialized loader: one fetch at a time. Prepended sections (above the
+        // viewport) compensate scrollTop so the page doesn't jump.
+        _scrollQueueLoad: function (doc, index) {
+            if (!this._scrollSections || this._scrollSections[index]) return;
+            this._scrollQ = this._scrollQ || [];
+            if (this._scrollQ.indexOf(index) === -1) this._scrollQ.push(index);
+            this._scrollPump(doc);
+        },
+
+        _scrollPump: function (doc) {
+            var self = this;
+            if (self._scrollBusy || !self._scrollQ || !self._scrollQ.length) return;
+            var index = self._scrollQ.shift();
+            if (!self._scrollSections || self._scrollSections[index]) { self._scrollPump(doc); return; }
+            self._scrollBusy = true;
+            var win = document.getElementById('abr-frame').contentWindow;
+            var beforeH = doc.documentElement.scrollHeight, beforeY = win.pageYOffset;
+            var prepend = index < self._chapterIndex;
+            self._fetchChapterParts(index).then(function (parts) {
+                if (!self._scrollSections) return; // exited scroll mode mid-flight
+                self._stitchSection(doc, index, parts);
+                if (prepend) win.scrollTo(0, beforeY + (doc.documentElement.scrollHeight - beforeH));
+            }).catch(function () {}).then(function () {
+                self._scrollBusy = false;
+                self._scrollPump(doc);
+            });
+        },
+
+        _scrollTrimWindow: function (doc) {
+            var keep = this._scrollWindow + 1;
+            var win = document.getElementById('abr-frame').contentWindow;
+            var self = this;
+            Object.keys(this._scrollSections).map(Number).forEach(function (idx) {
+                if (Math.abs(idx - self._chapterIndex) <= keep) return;
+                var sec = self._scrollSections[idx];
+                if (idx < self._chapterIndex) {
+                    var beforeH = doc.documentElement.scrollHeight, beforeY = win.pageYOffset;
+                    sec.parentNode.removeChild(sec);
+                    win.scrollTo(0, Math.max(0, beforeY - (beforeH - doc.documentElement.scrollHeight)));
+                } else {
+                    sec.parentNode.removeChild(sec);
+                }
+                delete self._scrollSections[idx];
+            });
+        },
+
+        _scrollEnsureWindow: function () {
+            var frame = document.getElementById('abr-frame');
+            if (!frame || !this._scrollSections) return;
+            var doc = frame.contentDocument, c = this._chapterIndex;
+            for (var d = 1; d <= this._scrollWindow; d++) {
+                if (c - d >= 0) this._scrollQueueLoad(doc, c - d);
+                if (c + d < this._spine.length) this._scrollQueueLoad(doc, c + d);
+            }
+        },
+
+        // Doc-level interactions for the stitched host (wired once): internal
+        // links resolve within their own section's chapter; middle-tap toggles
+        // controls. No side-tap page turns in continuous scroll.
+        _wireSectionInteractions: function (doc, sec, index) {
+            var self = this;
+            if (doc.body.abrScrollWired) return;
+            doc.body.abrScrollWired = true;
+            doc.addEventListener('click', function (e) {
+                var a = e.target.closest('a');
+                if (a) {
+                    var owner = a.closest('section.abr-ch');
+                    var chIdx = owner ? parseInt(owner.getAttribute('data-ch'), 10) : self._chapterIndex;
+                    var etype = a.getAttribute('epub:type') ||
+                        a.getAttributeNS('http://www.idpf.org/2007/ops', 'type') ||
+                        a.getAttribute('data-epub-type') || '';
+                    var role = a.getAttribute('role') || '';
+                    var isNoteref = /noteref/.test(etype) || role === 'doc-noteref' || role === 'doc-backlink';
+                    if (a.dataset.abrChapter !== undefined) {
+                        e.preventDefault();
+                        var ch = parseInt(a.dataset.abrChapter, 10);
+                        var an = a.dataset.abrAnchor || null;
+                        if (isNoteref && an) self._showFootnote(ch, an, a.textContent);
+                        else self._scrollGoToAnchor(ch, an);
+                        return;
+                    }
+                    var href = a.getAttribute('href') || '';
+                    if (href.startsWith('#')) {
+                        e.preventDefault();
+                        var id = href.slice(1);
+                        if (!id) return;
+                        if (isNoteref) { self._showFootnote(chIdx, id, a.textContent); return; }
+                        self._scrollGoToAnchor(chIdx, id);
+                    }
+                    return;
+                }
+                if (e.target.closest('button, input, select, textarea')) return;
+                var seln = doc.getSelection && doc.getSelection();
+                if (seln && seln.toString()) return;
+                var x = e.clientX / doc.documentElement.clientWidth;
+                if (x >= 0.33 && x <= 0.66) self._setImmersive(!self._immersive);
+            });
         },
 
         _setImmersive: function (on) {
             // Close open panels properly first so their buttons' aria-expanded
             // stays truthful while hidden by immersive mode
             if (on) {
-                var colophon = document.getElementById('abr-colophon');
-                if (colophon && !colophon.hasAttribute('hidden')) this._toggleColophon();
+                var settingsModal = document.getElementById('abr-settings');
+                if (settingsModal && !settingsModal.hasAttribute('hidden')) this._closeSettingsModal();
                 var bookmap = document.getElementById('abr-bookmap');
                 if (bookmap && !bookmap.hasAttribute('hidden')) this._toggleBookMap();
             }
@@ -1076,8 +1717,9 @@ if (typeof window.a11yBookReader === 'undefined') {
             var overlay = document.getElementById('abr-overlay');
             if (!overlay) return;
 
-            // Escape / TV back, in priority order: close the colophon panel →
-            // close TTS settings → leave immersive → close the reader
+            // Escape / TV back, in priority order: dismiss a footnote →
+            // close the settings modal → close the book map → leave immersive →
+            // close the reader
             if (e.key === 'Escape' || e.key === 'GoBack' || e.key === 'BrowserBack') {
                 e.preventDefault();
                 var footnote = document.getElementById('abr-footnote');
@@ -1087,17 +1729,10 @@ if (typeof window.a11yBookReader === 'undefined') {
                     if (fr) fr.focus();
                     return;
                 }
+                var settingsModal = document.getElementById('abr-settings');
+                if (settingsModal && !settingsModal.hasAttribute('hidden')) { this._closeSettingsModal(); return; }
                 var bookmap = document.getElementById('abr-bookmap');
                 if (bookmap && !bookmap.hasAttribute('hidden')) { this._toggleBookMap(); return; }
-                var colophon = document.getElementById('abr-colophon');
-                if (colophon && !colophon.hasAttribute('hidden')) { this._toggleColophon(); return; }
-                var ttsPanel = document.getElementById('abr-tts-settings');
-                if (ttsPanel && !ttsPanel.hasAttribute('hidden')) {
-                    ttsPanel.setAttribute('hidden', '');
-                    var tsBtn = document.getElementById('abr-tts-settings-btn');
-                    if (tsBtn) { tsBtn.setAttribute('aria-expanded', 'false'); tsBtn.focus(); }
-                    return;
-                }
                 if (this._immersive) { this._setImmersive(false); return; }
                 this._closeReader(); return;
             }
@@ -1116,10 +1751,10 @@ if (typeof window.a11yBookReader === 'undefined') {
             var frame = document.getElementById('abr-frame');
             if (document.activeElement === frame) {
                 if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ' || e.key === 'Spacebar') {
-                    e.preventDefault(); this._turn(1); return;
+                    e.preventDefault(); this._turnByPage(1); return;
                 }
                 if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
-                    e.preventDefault(); this._turn(-1); return;
+                    e.preventDefault(); this._turnByPage(-1); return;
                 }
                 if (this._viewMode === 'scroll' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
                     e.preventDefault();
@@ -1131,12 +1766,12 @@ if (typeof window.a11yBookReader === 'undefined') {
                     } catch (err) {}
                     return;
                 }
-                if (this._viewMode === 'paged' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-                    e.preventDefault(); this._turn(e.key === 'ArrowDown' ? 1 : -1); return;
+                if (this._viewMode === 'page' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                    e.preventDefault(); this._turnByPage(e.key === 'ArrowDown' ? 1 : -1); return;
                 }
                 if (e.key === 'Home' || e.key === 'End') {
                     e.preventDefault();
-                    if (this._viewMode === 'paged') {
+                    if (this._viewMode === 'page') {
                         this._goToPage(e.key === 'Home' ? 0 : this._pageCount - 1);
                     } else {
                         try {
@@ -1176,9 +1811,17 @@ if (typeof window.a11yBookReader === 'undefined') {
         _trapFocus: function (overlay) {
             overlay.addEventListener('keydown', function (e) {
                 if (e.key !== 'Tab') return;
+                // With an aria-modal dialog open (settings / book map), the trap
+                // must cycle INSIDE the dialog — trapping at the overlay level let
+                // Tab walk the toolbar behind it (WCAG C1). No dialog → overlay.
+                var root = overlay.querySelector('.abr-modal:not([hidden])') || overlay;
                 var focusable = Array.from(
-                    overlay.querySelectorAll('button:not([disabled]), iframe[tabindex="0"], [tabindex="0"]')
-                ).filter(function (el) { return !el.closest('[hidden]'); });
+                    root.querySelectorAll('button:not([disabled]), iframe[tabindex="0"], [tabindex="0"]')
+                ).filter(function (el) {
+                    // Exclude hidden subtrees and roving-tabindex parked elements
+                    // (tabIndex -1 isn't in the real Tab order).
+                    return !el.closest('[hidden]') && el.tabIndex >= 0;
+                });
                 if (!focusable.length) return;
 
                 var first = focusable[0];
@@ -1304,11 +1947,9 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (!this._ttsPlaying && !this._ttsPaused) return null;
             try {
                 var abs = this._ttsCharOffset;
-                if (this._piperAudio && this._piperAudio.abrCost) {
-                    var a = this._piperAudio;
-                    var dur = a.abrEstDuration;
-                    var frac = dur ? Math.min(a.currentTime / dur, 1) : 0;
-                    abs += this._costToChar(a.abrCost, frac * a.abrCost[a.abrCost.length - 1]);
+                if (this._piperAudio && this._piperLastAbs != null) {
+                    // Real-timing manifest: the last highlighted absolute offset
+                    abs = this._piperLastAbs;
                 } else if (this._hlTicker && this._hlTickLast != null) {
                     abs = this._hlTickLast;
                 } else {
@@ -1325,16 +1966,50 @@ if (typeof window.a11yBookReader === 'undefined') {
             return null;
         },
 
+        // Character offset of the first VISIBLE character — uses the caret at
+        // the top-left of the visible reading area, so a paragraph continued
+        // from the previous page is read from its continuation, not skipped.
+        _firstVisibleCharOffset: function () {
+            try {
+                var frame = document.getElementById('abr-frame');
+                var doc = frame.contentDocument, win = frame.contentWindow;
+                this._ensureOffsetMap();
+                var cs = win.getComputedStyle(doc.body);
+                var x = (parseFloat(cs.paddingLeft) || 24) + 2;
+                var y = this._viewMode === 'page' ? (parseFloat(cs.paddingTop) || 24) + 2 : 2;
+                var node = null, off = 0;
+                if (doc.caretRangeFromPoint) {
+                    var r = doc.caretRangeFromPoint(x, y);
+                    if (r) { node = r.startContainer; off = r.startOffset; }
+                } else if (doc.caretPositionFromPoint) {
+                    var p = doc.caretPositionFromPoint(x, y);
+                    if (p) { node = p.offsetNode; off = p.offset; }
+                }
+                if (node && node.nodeType === 3) {
+                    var map = this._ttsOffsetMap;
+                    for (var i = 0; i < map.length; i++) {
+                        if (map[i].node === node) {
+                            return map[i].absStart + Math.min(off, (node.textContent || '').length);
+                        }
+                    }
+                }
+            } catch (e) {}
+            // Fallback: first whole paragraph on the page
+            return this._paraCharOffset(this._firstVisiblePara());
+        },
+
         _startTts: function () {
             var self = this;
-            // Fresh start (not a pause-resume or mid-read restart): begin at
-            // the paragraph the book resumed at — the one that was being
-            // read — falling back to the current visual position.
+            // Fresh start (not a pause-resume or mid-read restart): begin at the
+            // resumed paragraph if one is pending, else at the first VISIBLE
+            // CHARACTER (handles partial paragraphs at a page top).
             if (!self._ttsPaused && self._ttsCharOffset === 0) {
-                var startPara = (self._ttsStartPara !== null && self._ttsStartPara !== undefined)
-                    ? self._ttsStartPara : self._firstVisiblePara();
-                self._ttsStartPara = null;
-                self._ttsCharOffset = self._paraCharOffset(startPara);
+                if (self._ttsStartPara !== null && self._ttsStartPara !== undefined) {
+                    self._ttsCharOffset = self._paraCharOffset(self._ttsStartPara);
+                    self._ttsStartPara = null;
+                } else {
+                    self._ttsCharOffset = self._firstVisibleCharOffset();
+                }
             }
             // Update the place continuously WHILE reading (every 10s): a
             // crash, TV power-off, or app kill mid-listen loses nothing.
@@ -1424,6 +2099,10 @@ if (typeof window.a11yBookReader === 'undefined') {
                 if (!self._ttsBoundarySeen) self._startHlTicker(self._ttsRate);
             };
             utterance.onend = function () {
+                // iOS Safari fires onend when cancel() runs during navigation.
+                // Only the CURRENT utterance's real end may advance chapters;
+                // a stale/canceled one is ignored (prevents spurious loops).
+                if (utterance !== self._ttsUtterance) return;
                 self._stopHlTicker();
                 self._ttsPlaying = false;
                 self._ttsPaused = false;
@@ -1477,6 +2156,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                 this._saveProgress(this._chapterIndex, this._currentScrollFraction(), spoken);
             }
             if (this._ttsSaveTimer) { clearInterval(this._ttsSaveTimer); this._ttsSaveTimer = null; }
+            this._piperLastAbs = null;
             this._ttsContinuous = false;
             this._stopHlTicker();
             this._stopPiperTts();
@@ -1515,7 +2195,15 @@ if (typeof window.a11yBookReader === 'undefined') {
                     if (isBlock && text.length && text[text.length - 1] !== '\n') text += '\n';
                 }
             }
-            if (doc && doc.body) walk(doc.body);
+            // In full-book scroll the doc holds many chapters; TTS reads the
+            // ACTIVE section only (advancing section-by-section), so scope the
+            // map to it. Other modes use the whole single-chapter body.
+            var root = doc && doc.body;
+            if (this._viewMode === 'scroll' && doc) {
+                var info = this._scrollActiveInfo(doc);
+                if (info && info.section) root = info.section;
+            }
+            if (root) walk(root);
             return {text: text, map: map};
         },
 
@@ -1552,17 +2240,55 @@ if (typeof window.a11yBookReader === 'undefined') {
                 var rect = range.getBoundingClientRect();
                 if (!rect || (rect.width === 0 && rect.height === 0)) return;
 
+                var ds = this._ds || this._dsDefaults;
+                var hlBg = ds.HlBg || '#ffd700', hlFg = ds.HlFg || '#1a1a1a';
+
+                // Preferred: CSS Custom Highlight API — highlights the real text
+                // range (always correctly positioned, even across page columns)
+                // and supports both text color and background. (Safari/iOS 17.2+)
+                if (iframeWin.CSS && iframeWin.CSS.highlights && iframeWin.Highlight) {
+                    var st = iframeDoc.getElementById('abr-hl-style');
+                    if (!st) {
+                        st = iframeDoc.createElement('style');
+                        st.id = 'abr-hl-style';
+                        iframeDoc.head.appendChild(st);
+                    }
+                    st.textContent = '::highlight(abr-tts){background-color:' + hlBg +
+                        ';color:' + hlFg + ';}';
+                    if (!this._cssHl) {
+                        this._cssHl = new iframeWin.Highlight();
+                        iframeWin.CSS.highlights.set('abr-tts', this._cssHl);
+                    }
+                    this._cssHl.clear();
+                    this._cssHl.add(range);
+                    // Hide the fallback box if it exists
+                    var ob = iframeDoc.getElementById('abr-hl-box');
+                    if (ob) ob.style.display = 'none';
+                    // Page-following still uses the range rect
+                    if (this._viewMode === 'page') {
+                        var bR = iframeDoc.body.getBoundingClientRect();
+                        var lx = rect.left - bR.left;
+                        var tp = Math.max(0, Math.min(this._pageCount - 1,
+                            Math.floor(lx / this._pageStep)));
+                        if (tp !== this._page) this._goToPage(tp);
+                    } else {
+                        this._followScroll(iframeWin, iframeDoc, entry.node);
+                    }
+                    return;
+                }
+
+                // Fallback: overlay box (background only — older browsers)
                 var box = iframeDoc.getElementById('abr-hl-box');
                 if (!box) {
                     box = iframeDoc.createElement('div');
                     box.id = 'abr-hl-box';
                     box.style.cssText = 'position:absolute;pointer-events:none;' +
-                        'background:rgba(255,215,0,.45);border-radius:2px;' +
-                        'z-index:2147483647;' +
+                        'border-radius:2px;mix-blend-mode:multiply;z-index:2147483647;' +
                         (this._reducedMotion ? '' : 'transition:left 80ms,top 80ms,width 80ms;');
                     iframeDoc.body.appendChild(box);
                 }
-                if (this._viewMode === 'paged') {
+                box.style.background = hlBg;
+                if (this._viewMode === 'page') {
                     // The transformed body is the box's containing block, so
                     // position in body-layout space: viewport rect minus the
                     // body's (transform-inclusive) rect. Viewport coords here
@@ -1583,30 +2309,52 @@ if (typeof window.a11yBookReader === 'undefined') {
                 // Follow the reading: turn the page (paged) / scroll (scroll).
                 // NEVER scrollIntoView in paged mode — it drags the html
                 // element to arbitrary offsets and breaks page alignment.
-                if (this._viewMode === 'paged') {
+                if (this._viewMode === 'page') {
                     var bRect = iframeDoc.body.getBoundingClientRect();
                     var layoutX = rect.left - bRect.left;
                     var targetPage = Math.max(0, Math.min(this._pageCount - 1,
                         Math.floor(layoutX / this._pageStep)));
                     if (targetPage !== this._page) this._goToPage(targetPage);
-                } else if (entry.node.parentElement) {
-                    var el = entry.node.parentElement;
-                    var erect = el.getBoundingClientRect();
-                    var vh = iframeWin.innerHeight || iframeDoc.documentElement.clientHeight;
-                    if (erect.top < vh * 0.15 || erect.bottom > vh * 0.85) {
-                        el.scrollIntoView({block: 'center', behavior: 'smooth'});
-                    }
+                } else {
+                    this._followScroll(iframeWin, iframeDoc, entry.node);
                 }
             } catch (e) {}
         },
 
         _clearTtsSelection: function (frame) {
             try {
+                if (frame && frame.contentWindow && this._cssHl) {
+                    this._cssHl.clear();
+                }
                 if (frame && frame.contentDocument) {
                     var box = frame.contentDocument.getElementById('abr-hl-box');
                     if (box) box.style.display = 'none';
                 }
             } catch (e) {}
+            this._hlPara = null;   // next highlight re-anchors the page to its paragraph
+        },
+
+        // Move the page only when the spoken text reaches a NEW paragraph — not
+        // on every audio tick. Re-positioning mid-paragraph is what made the
+        // view keep scrolling/jumping around the highlighted word.
+        _followScroll: function (iframeWin, iframeDoc, node) {
+            var BLOCK = /^(P|DIV|H[1-6]|LI|TR|TD|TH|BLOCKQUOTE|SECTION|ARTICLE|HEADER|FOOTER|MAIN|NAV|ASIDE|FIGURE|FIGCAPTION|PRE)$/;
+            var block = node && node.parentElement;
+            while (block && !BLOCK.test(block.nodeName)) block = block.parentElement;
+            if (!block || block === this._hlPara) return;   // same paragraph → leave the page where it is
+            this._hlPara = block;
+            var vh = iframeWin.innerHeight || iframeDoc.documentElement.clientHeight || 0;
+            if (!vh) return;
+            var r = block.getBoundingClientRect();
+            if (r.top >= vh * 0.12 && r.top <= vh * 0.55) return;   // new paragraph already well placed
+            var cur = iframeWin.pageYOffset || iframeDoc.documentElement.scrollTop || 0;
+            var target = cur + r.top - vh * 0.25;
+            if (target < 0) target = 0;
+            try {
+                iframeWin.scrollTo({ top: target, behavior: this._reducedMotion ? 'auto' : 'smooth' });
+            } catch (e) {
+                try { iframeWin.scrollTo(0, target); } catch (e2) {}
+            }
         },
 
         // Expand an estimated char offset to whole-word boundaries in _ttsFullText
@@ -1623,50 +2371,6 @@ if (typeof window.a11yBookReader === 'undefined') {
             while (s > 0 && /\S/.test(t[s - 1])) s--;
             while (e < t.length && /\S/.test(t[e])) e++;
             return {start: s, len: e - s};
-        },
-
-        // Cumulative "speech cost" of the text: 1 per character plus pause
-        // weights at punctuation — Piper inserts real silence at sentence and
-        // clause breaks, which a flat chars/sec clock drifts past. atempo
-        // scales speech and pauses uniformly, so one rate term stays valid
-        // at every speed.
-        _buildPiperCost: function (text) {
-            var n = text.length;
-            var cum = new Float64Array(n + 1);
-            var c = 0;
-            var prevWs = false;
-            for (var i = 0; i < n; i++) {
-                var ch = text[i];
-                var isWs = ch === ' ' || ch === '\n' || ch === '\t' || ch === '\r';
-                var w;
-                if (isWs) {
-                    // Piper collapses whitespace: a whole run is one word
-                    // separator. Pretty-printed EPUB markup yields huge
-                    // indentation runs that are never spoken — billing them
-                    // per character made the highlight crawl behind the voice.
-                    // Paragraph breaks measured ~0 extra pause beyond the
-                    // sentence pause, so newlines get no bonus.
-                    w = prevWs ? 0 : 1;
-                } else {
-                    w = 1;
-                    if (ch === '.' || ch === '!' || ch === '?') w += 9;       // sentence pause
-                    else if (ch === ',' || ch === ';' || ch === ':') w += 3;  // clause pause (measured 0.15s)
-                }
-                prevWs = isWs;
-                c += w;
-                cum[i + 1] = c;
-            }
-            return cum;
-        },
-
-        // Largest char index whose cumulative cost is <= target (binary search)
-        _costToChar: function (cum, target) {
-            var lo = 0, hi = cum.length - 1;
-            while (lo < hi) {
-                var mid = (lo + hi) >> 1;
-                if (cum[mid] < target) lo = mid + 1; else hi = mid;
-            }
-            return Math.max(0, lo - 1);
         },
 
         // ── Estimated-highlight ticker (platforms without word events) ───────
@@ -1750,15 +2454,32 @@ if (typeof window.a11yBookReader === 'undefined') {
                 // Fall through — still try to add Piper voices even if browser list is empty
             }
 
-            // Fetch downloaded Piper voices and build the unified dropdown
+            // Piper voices are static for the session, so fetch them ONCE and
+            // cache. Without this, the browser-voice retry above re-requested
+            // /piper/voices on every attempt (up to 20×) when the browser voice
+            // list loads slowly or is empty (headless, some TVs).
+            if (self._piperVoiceCache) {
+                self._buildVoiceSelect(document.getElementById('abr-voice-select'),
+                    hasSpeech ? window.speechSynthesis.getVoices() : [], self._piperVoiceCache);
+                return;
+            }
+            if (self._piperVoiceFetching) {
+                // A fetch is already in flight; just reflect the latest browser voices.
+                self._buildVoiceSelect(document.getElementById('abr-voice-select'), browserVoices, []);
+                return;
+            }
+            self._piperVoiceFetching = true;
             ApiClient.ajax({
                 url: ApiClient.getUrl('A11yBookReader/piper/voices'),
                 type: 'GET',
                 dataType: 'json'
             }).then(function (piperVoices) {
+                self._piperVoiceCache = piperVoices || [];
+                self._piperVoiceFetching = false;
                 var fresh = hasSpeech ? window.speechSynthesis.getVoices() : [];
-                self._buildVoiceSelect(document.getElementById('abr-voice-select'), fresh, piperVoices || []);
+                self._buildVoiceSelect(document.getElementById('abr-voice-select'), fresh, self._piperVoiceCache);
             }).catch(function () {
+                self._piperVoiceFetching = false;
                 self._buildVoiceSelect(document.getElementById('abr-voice-select'), browserVoices, []);
             });
         },
@@ -1766,6 +2487,30 @@ if (typeof window.a11yBookReader === 'undefined') {
         _buildVoiceSelect: function (select, browserVoices, piperVoices) {
             if (!select) return;
             var currentURI = this._ttsVoiceURI;
+
+            // No saved voice: default to a Piper voice (server-side, identical on
+            // every platform) instead of the browser/system default, which is
+            // SILENT on TVs and headless browsers. Priority: bundled Ryan >
+            // first Piper > TV built-in > first browser voice. While the Piper
+            // list is still in flight, don't commit a fallback — a fast browser
+            // voice list would otherwise win the save over Piper.
+            if (!currentURI && !this._piperVoiceFetching) {
+                if (piperVoices && piperVoices.length > 0) {
+                    var ryan = null;
+                    for (var pi = 0; pi < piperVoices.length; pi++) {
+                        if (piperVoices[pi].key === 'en_US-ryan-medium') { ryan = piperVoices[pi]; break; }
+                    }
+                    currentURI = 'piper:' + (ryan ? ryan.key : piperVoices[0].key);
+                } else if (this._getTvTtsApi()) {
+                    currentURI = 'tv:builtin';
+                } else if (browserVoices && browserVoices.length > 0) {
+                    currentURI = browserVoices[0].voiceURI;
+                }
+                if (currentURI) {
+                    this._ttsVoiceURI = currentURI;
+                    this._saveSettings();
+                }
+            }
             select.innerHTML = '';
 
             // Piper voices first — server-side, so they're the only voices that
@@ -1796,14 +2541,11 @@ if (typeof window.a11yBookReader === 'undefined') {
                 select.appendChild(tvg);
             }
 
-            // Browser voices optgroup
+            // Browser voices optgroup — no implicit '' "Default" entry: the
+            // system-default voice is unpredictable per platform (and absent on
+            // TVs/headless), so every selectable option is now a concrete voice.
             var bg = document.createElement('optgroup');
             bg.label = 'Browser voices';
-            var def = document.createElement('option');
-            def.value = '';
-            def.textContent = 'Default';
-            if (!currentURI) def.selected = true;
-            bg.appendChild(def);
             browserVoices.forEach(function (v) {
                 var opt = document.createElement('option');
                 opt.value = v.voiceURI;
@@ -1820,6 +2562,12 @@ if (typeof window.a11yBookReader === 'undefined') {
             return typeof this._ttsVoiceURI === 'string' && this._ttsVoiceURI.indexOf('piper:') === 0;
         },
 
+        // Piper TTS with REAL per-sentence timing. The server STREAMS the audio
+        // as MP3 (fast start, iOS-compatible) with the speed baked in (ffmpeg
+        // atempo), and fills a per-sentence timing manifest *as it streams* —
+        // measured from the exact audio being played, in output time. The client
+        // streams the audio and polls the manifest; the highlight re-syncs every
+        // sentence with zero drift. Speed change = re-stream from current pos.
         _startPiperTts: function () {
             var self = this;
             var frame = document.getElementById('abr-frame');
@@ -1833,127 +2581,137 @@ if (typeof window.a11yBookReader === 'undefined') {
                 } catch (e) { return; }
             }
 
-            var text = self._ttsFullText.slice(self._ttsCharOffset).trim();
-            if (!text) {
+            var text = self._ttsFullText.slice(self._ttsCharOffset);
+            if (!text.trim()) {
                 if (self._ttsContinuous) {
                     var next = self._chapterIndex + 1;
-                    if (next < self._spine.length) { self._loadChapter(next); }
+                    if (next < self._spine.length) { self._ttsAdvanceChapter(next); }
                     else { self._ttsContinuous = false; self._updateTtsButtons(); }
                 }
                 return;
             }
 
             var voiceKey = self._ttsVoiceURI.slice(6);
+            var base = self._ttsCharOffset;
+            self._hlPara = null;   // re-anchor the page to the first spoken paragraph
             self._ttsPlaying = true;
             self._updateTtsButtons();
 
-            // Step 1: register the text server-side (small fast POST), get a stream id
+            var token = (typeof ApiClient !== 'undefined' && ApiClient.accessToken) ? ApiClient.accessToken() : '';
+
+            // Step 1: register the text, get a session id.
             var xhr = new XMLHttpRequest();
             xhr.open('POST', ApiClient.getUrl('A11yBookReader/tts/prepare'));
             xhr.setRequestHeader('Content-Type', 'application/json');
-            var token = window.ApiClient && ApiClient.accessToken ? ApiClient.accessToken() : '';
             if (token) xhr.setRequestHeader('X-Emby-Authorization', 'MediaBrowser Token="' + token + '"');
             xhr.responseType = 'json';
             self._piperXhr = xhr;
-
             xhr.onload = function () {
                 self._piperXhr = null;
                 var id = (xhr.status === 200 && xhr.response) ? xhr.response.id : null;
-                if (!id) {
-                    self._ttsPlaying = false;
-                    self._updateTtsButtons();
-                    return;
-                }
+                if (!id) { self._ttsPlaying = false; self._updateTtsButtons(); return; }
 
-                // Step 2: play the stream — audio starts as soon as the first
-                // sentence is synthesized instead of waiting for the whole chapter.
-                // Speed is baked into the synthesis server-side (--length_scale);
-                // playbackRate is ignored by browsers on unknown-length streams.
+                // Step 2: stream the audio (fast start, browser plays as bytes arrive).
                 var url = ApiClient.getUrl('A11yBookReader/tts/stream/' + id, token ? { api_key: token } : {});
-                // Reuse the gesture-blessed element (iOS) — fall back to a fresh
-                // one if playback starts without a gesture having created it.
                 var audio = self._piperAudioEl || (self._piperAudioEl = new Audio());
-                // Scrub leftovers from a naturally-ended previous stream: its
-                // stale currentTime would otherwise feed the first timeupdate
-                // events and march the highlight ahead during the silent gap.
-                audio.ontimeupdate = null;
-                audio.onended = null;
-                audio.onerror = null;
+                audio.ontimeupdate = null; audio.onended = null; audio.onerror = null;
                 try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
-                // on* properties (not addEventListener) so handlers are replaced,
-                // not stacked, each time the element is reused for a new stream.
-                // Live streams misreport .duration (it grows with the buffer), so
-                // progress runs off a pause-weighted cost model: ~20 cost-units/sec
-                // at 1× (measured against real Piper output), scaled by speed.
-                var cost = self._buildPiperCost(text);
-                audio.abrCost = cost;
-                audio.abrEstDuration = cost[cost.length - 1] / (20 * self._ttsRate);
+                audio.playbackRate = 1;                  // speed is baked server-side (ffmpeg atempo); iOS ignores playbackRate on a live stream. Manifest is in output time, so currentTime aligns.
+                audio.abrSpans = [];                      // grows via polling
+                audio.abrBase = base;
                 self._piperAudio = audio;
 
+                // Step 3: poll the growing timing manifest (synthesis ~15x realtime
+                // stays well ahead of playback, so accurate highlight kicks in fast).
+                if (self._piperPoll) { clearInterval(self._piperPoll); }
+                var pollUrl = ApiClient.getUrl('A11yBookReader/tts/timing/' + id, token ? { api_key: token } : {});
+                self._piperPoll = setInterval(function () {
+                    if (audio !== self._piperAudio) { clearInterval(self._piperPoll); self._piperPoll = null; return; }
+                    ApiClient.ajax({ url: pollUrl, type: 'GET', dataType: 'json' }).then(function (r) {
+                        if (audio !== self._piperAudio) return;
+                        var spans = (r.spans || r.Spans || []).map(function (s) {
+                            return {
+                                cs: s.CharStart != null ? s.CharStart : s.charStart,
+                                ce: s.CharEnd != null ? s.CharEnd : s.charEnd,
+                                s: s.StartMs != null ? s.StartMs : s.startMs,
+                                e: s.EndMs != null ? s.EndMs : s.endMs
+                            };
+                        });
+                        // Never shrink: a transient short manifest (the server
+                        // resets its span list on an iOS re-fetch) must not yank
+                        // the highlight backward. Spans only grow legitimately.
+                        if (spans.length >= (audio.abrSpans ? audio.abrSpans.length : 0)) audio.abrSpans = spans;
+                        if ((r.done || r.Done) && self._piperPoll) { clearInterval(self._piperPoll); self._piperPoll = null; }
+                    }).catch(function () {});
+                }, 700);
+
                 audio.ontimeupdate = function () {
-                    // Only trust the clock while audio is actually playing —
-                    // early events before decodable data carry stale times
                     if (audio.paused || audio.seeking || audio.readyState < 2) return;
-                    // Don't read audio.duration: a live chunked stream reports
-                    // a finite, growing duration (the buffered length), pinning
-                    // the fraction near 1. Map elapsed time through the
-                    // pause-weighted cost model instead.
-                    var total = audio.abrEstDuration;
-                    var cum = audio.abrCost;
-                    if (!total || !cum) return;
-                    var frac = Math.min(audio.currentTime / total, 1);
-                    var rel = self._costToChar(cum, frac * cum[cum.length - 1]);
-                    var absOff = self._ttsCharOffset + rel;
-                    var w = self._snapToWord(absOff);
-                    if (w) self._highlightWord(frame, w.start, w.len);
+                    self._piperHighlight(frame, audio);
                 };
 
                 audio.onended = function () {
+                    if (audio !== self._piperAudio) return;
+                    if (self._piperPoll) { clearInterval(self._piperPoll); self._piperPoll = null; }
                     self._piperAudio = null;
-                    self._ttsPlaying = false;
-                    self._ttsPaused = false;
                     self._ttsCharOffset = 0;
-                    self._ttsFullText = '';
-                    self._ttsLastBoundary = 0;
-                    self._ttsOffsetMap = [];
                     self._clearTtsSelection(frame);
-
                     if (self._ttsContinuous) {
-                        var nextCh = self._chapterIndex + 1;
-                        if (nextCh < self._spine.length) { self._loadChapter(nextCh); }
-                        else { self._ttsContinuous = false; self._updateTtsButtons(); var info = document.getElementById('abr-chapter-info'); if (info) info.textContent = 'End of book'; }
-                    } else { self._updateTtsButtons(); }
+                        var nc = self._chapterIndex + 1;
+                        if (nc < self._spine.length) { self._ttsAdvanceChapter(nc); }
+                        else {
+                            self._ttsContinuous = false; self._ttsPlaying = false; self._updateTtsButtons();
+                            var ei = document.getElementById('abr-chapter-info');
+                            if (ei) ei.textContent = 'End of book';
+                        }
+                    } else { self._ttsPlaying = false; self._updateTtsButtons(); }
                 };
 
                 audio.onerror = function () {
+                    if (audio !== self._piperAudio) return;
+                    if (self._piperPoll) { clearInterval(self._piperPoll); self._piperPoll = null; }
                     self._piperAudio = null;
-                    self._ttsPlaying = false;
-                    self._ttsPaused = false;
-                    self._ttsContinuous = false;
-                    self._updateTtsButtons();
+                    self._ttsPlaying = false; self._ttsPaused = false;
+                    self._ttsContinuous = false; self._updateTtsButtons();
                 };
 
                 audio.src = url;
                 var played = audio.play();
                 if (played && played.catch) {
                     played.catch(function () {
-                        // iOS NotAllowedError (or decode failure) — surface as stopped
                         self._piperAudio = null;
-                        self._ttsPlaying = false;
-                        self._ttsPaused = false;
-                        self._ttsContinuous = false;
-                        self._updateTtsButtons();
+                        self._ttsPlaying = false; self._ttsPaused = false;
+                        self._ttsContinuous = false; self._updateTtsButtons();
                     });
                 }
             };
-
             xhr.onerror = function () {
                 self._piperXhr = null;
-                self._ttsPlaying = false;
-                self._updateTtsButtons();
+                self._ttsPlaying = false; self._updateTtsButtons();
             };
-
             xhr.send(JSON.stringify({ text: text, voice: voiceKey, rate: self._ttsRate }));
+        },
+
+        _piperHighlight: function (frame, audio) {
+            var spans = audio.abrSpans;
+            if (!spans || !spans.length) return;
+            var t = audio.currentTime * 1000; // media-time ms (1×)
+            // binary search for the span containing t
+            var lo = 0, hi = spans.length - 1, idx = -1;
+            while (lo <= hi) {
+                var mid = (lo + hi) >> 1;
+                if (t < spans[mid].s) hi = mid - 1;
+                else if (t >= spans[mid].e) lo = mid + 1;
+                else { idx = mid; break; }
+            }
+            if (idx < 0) idx = Math.min(spans.length - 1, Math.max(0, lo));
+            var sp = spans[idx];
+            var frac = sp.e > sp.s ? Math.min(1, Math.max(0, (t - sp.s) / (sp.e - sp.s))) : 0;
+            var wordCharRel = sp.cs + Math.floor(frac * (sp.ce - sp.cs));
+            var absOff = audio.abrBase + wordCharRel;
+            this._piperLastAbs = absOff;
+            var w = this._snapToWord(absOff);
+            if (w) this._highlightWord(frame, w.start, w.len);
         },
 
         _stopPiperTts: function () {
@@ -1974,6 +2732,8 @@ if (typeof window.a11yBookReader === 'undefined') {
                 this._piperXhr.abort();
                 this._piperXhr = null;
             }
+            if (this._piperPoll) { clearInterval(this._piperPoll); this._piperPoll = null; }
+            this._hlPara = null;
         },
 
         // ── TV Platform TTS (Samsung Tizen / LG webOS) ───────────────────────────
@@ -2006,7 +2766,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (!text) {
                 if (self._ttsContinuous) {
                     var next = self._chapterIndex + 1;
-                    if (next < self._spine.length) { self._loadChapter(next); }
+                    if (next < self._spine.length) { self._ttsAdvanceChapter(next); }
                     else { self._ttsContinuous = false; self._updateTtsButtons(); }
                 }
                 return;
@@ -2101,7 +2861,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (self._ttsContinuous) {
                 var next = self._chapterIndex + 1;
                 if (next < self._spine.length) {
-                    self._loadChapter(next);
+                    self._ttsAdvanceChapter(next);
                 } else {
                     self._ttsContinuous = false;
                     self._updateTtsButtons();
@@ -2151,7 +2911,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             } catch (e) {}
         },
 
-        // ── Display Settings (colophon) ──────────────────────────────────────
+        // ── Display Settings ─────────────────────────────────────────────────
 
         _fetchDisplaySettings: function () {
             var self = this;
@@ -2162,13 +2922,52 @@ if (typeof window.a11yBookReader === 'undefined') {
             }).then(function (s) {
                 self._ds = self._mergeSettings(s);
             }).catch(function () {
-                // No server settings yet (or offline): local cache, then defaults
+                // No server settings yet (or offline): local cache, then defaults.
+                // The server runs the authoritative v1→v2 ViewMode migration; the
+                // offline cache can't reach it, so migrate the cached blob here
+                // once (per-user marker) before it's used, or a legacy 'scroll'
+                // (which meant scroll-within-chapter) would teleport the user
+                // into the new full-book engine.
                 try {
-                    var raw = localStorage.getItem('abr-display-' +
-                        (ApiClient.getCurrentUserId ? ApiClient.getCurrentUserId() : 'anon'));
-                    self._ds = self._mergeSettings(raw ? JSON.parse(raw) : null);
+                    var uid = (ApiClient.getCurrentUserId ? ApiClient.getCurrentUserId() : 'anon');
+                    var key = 'abr-display-' + uid;
+                    var raw = localStorage.getItem(key);
+                    var cached = raw ? JSON.parse(raw) : null;
+                    if (cached && self._migrateCachedSettings(cached, uid)) {
+                        try { localStorage.setItem(key, JSON.stringify(cached)); } catch (e) {}
+                    }
+                    self._ds = self._mergeSettings(cached);
                 } catch (e) { self._ds = self._mergeSettings(null); }
             });
+        },
+
+        // Offline-cache mirror of the server's v1→v2 migration. Per-user marker
+        // so a later genuine 'scroll' selection is never undone.
+        _migrateCachedSettings: function (cached, uid) {
+            var SCHEMA = 2;
+            var mk = 'abr-schema-' + uid;
+            var marker = 0;
+            try { marker = parseInt(localStorage.getItem(mk) || '0', 10) || 0; } catch (e) {}
+            if (marker >= SCHEMA) return false;
+            var changed = false;
+            if (cached.ViewMode === 'paged') { cached.ViewMode = 'page'; changed = true; }
+            else if (cached.ViewMode === 'scroll') { cached.ViewMode = 'chapter'; changed = true; }
+            try { localStorage.setItem(mk, String(SCHEMA)); } catch (e) {}
+            return changed;
+        },
+
+        // Coerce a stored ViewMode to the 3-way set. Legacy 'paged' is
+        // unambiguous; legacy 'scroll' is migrated upstream (server + cache),
+        // so a 'scroll' reaching here is the new full-book mode.
+        _normalizeViewMode: function (v) {
+            if (v === 'page' || v === 'chapter' || v === 'scroll') return v;
+            if (v === 'paged') return 'page';
+            return 'chapter';
+        },
+
+        _normalizeNavUnit: function (v) {
+            return (v === 'chapter' || v === 'page' || v === 'heading' ||
+                    v === 'paragraph' || v === 'sentence') ? v : 'chapter';
         },
 
         _mergeSettings: function (s) {
@@ -2244,6 +3043,48 @@ if (typeof window.a11yBookReader === 'undefined') {
             this._ttsStartPara = null;
         },
 
+        // TTS finished a chapter and continuous reading is on. Single-chapter
+        // modes reload the frame (which auto-restarts TTS via _ttsContinuous);
+        // scroll mode keeps the stitched doc and scrolls to the next section,
+        // restarting TTS there once it's laid out.
+        _ttsAdvanceChapter: function (next) {
+            var self = this;
+            if (this._viewMode === 'scroll') {
+                this._chapterIndex = next;
+                this._scrollGoToAnchor(next, null);
+                // The offset map is scoped to the ACTIVE section — drop the old
+                // section's cache or the restart re-reads its stale text and the
+                // empty-skip path silently walks to the end of the book.
+                this._ttsCharOffset = 0;
+                this._ttsStartPara = null;
+                this._ttsLastBoundary = 0;
+                this._ttsFullText = '';
+                this._ttsOffsetMap = [];
+                // _scrollGoToAnchor may still be loading the target section (it
+                // retries for up to 2s); restart TTS only once the target is the
+                // active section, or the rebuilt map would capture the old one.
+                var tries = 0;
+                var iv = setInterval(function () {
+                    if (!self._ttsContinuous) { clearInterval(iv); return; }
+                    var frame = document.getElementById('abr-frame');
+                    var doc = frame && frame.contentDocument;
+                    var sec = self._scrollSections && self._scrollSections[next];
+                    var arrived = false;
+                    if (doc && sec) {
+                        var info = self._scrollActiveInfo(doc);
+                        arrived = !!(info && info.section === sec);
+                    }
+                    if (arrived || ++tries > 25) {
+                        clearInterval(iv);
+                        self._updateTtsButtons(true);
+                        self._startTts();
+                    }
+                }, 100);
+            } else {
+                this._loadChapter(next);
+            }
+        },
+
         // Jump to chapter+anchor; remembers where you came from
         _goToTarget: function (chapter, anchor, pushBack) {
             if (typeof chapter !== 'number' || chapter < 0 || chapter >= this._spine.length) return;
@@ -2251,6 +3092,13 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (pushBack) {
                 this._navStack.push(this._snapshotLocator());
                 this._updateBackBtn();
+            }
+            if (this._viewMode === 'scroll') {
+                // Continuous scroll: scroll to the target section (loading it if
+                // it isn't resident) rather than reloading the frame.
+                this._chapterIndex = chapter;
+                this._scrollGoToAnchor(chapter, anchor || null);
+                return;
             }
             if (chapter === this._chapterIndex) {
                 if (anchor) this._goToAnchor(anchor);
@@ -2262,6 +3110,7 @@ if (typeof window.a11yBookReader === 'undefined') {
 
         _goToAnchor: function (anchor) {
             this._navResetTts(); // Play resumes from the link target
+            if (this._viewMode === 'scroll') { this._scrollGoToAnchor(this._chapterIndex, anchor); return; }
             try {
                 var frame = document.getElementById('abr-frame');
                 var doc = frame.contentDocument;
@@ -2272,7 +3121,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                     if (named && named.length) el = named[0];
                 }
                 if (!el) return;
-                if (this._viewMode === 'paged') {
+                if (this._viewMode === 'page') {
                     this._goToPage(Math.max(0, Math.min(this._pageCount - 1,
                         Math.floor(el.offsetLeft / this._pageStep))), true);
                 } else {
@@ -2288,9 +3137,20 @@ if (typeof window.a11yBookReader === 'undefined') {
             this._updateBackBtn();
             if (!loc) return;
             this._navResetTts(); // Play resumes from the returned position
+            if (this._viewMode === 'scroll') {
+                this._chapterIndex = loc.chapter;
+                this._scrollGoToAnchor(loc.chapter, null);
+                if (loc.para != null) {
+                    var selfRef = this;
+                    setTimeout(function () { selfRef._scrollGoToPara(loc.chapter, loc.para); }, 120);
+                }
+                var infoB = document.getElementById('abr-chapter-info');
+                if (infoB) infoB.textContent = 'Returning to your reading position';
+                return;
+            }
             if (loc.chapter === this._chapterIndex) {
                 if (!this._goToPara(loc.para)) {
-                    if (this._viewMode === 'paged') {
+                    if (this._viewMode === 'page') {
                         this._goToPage(Math.round(loc.fraction * (this._pageCount - 1)), true);
                     }
                 }
@@ -2323,14 +3183,12 @@ if (typeof window.a11yBookReader === 'undefined') {
                 if (btn) { btn.setAttribute('aria-expanded', 'false'); btn.focus(); }
                 return;
             }
-            // Collapse the colophon so only one panel is open
-            var colophon = document.getElementById('abr-colophon');
-            if (colophon && !colophon.hasAttribute('hidden')) this._toggleColophon();
+            this._closeOtherPanels('bookmap'); // only one popup open at a time
             panel.removeAttribute('hidden');
             if (btn) btn.setAttribute('aria-expanded', 'true');
             this._fetchNav().then(function () {
                 self._renderBookMapTab(self._bookMapTab || 'toc');
-                var first = panel.querySelector('.abr-map-tab');
+                var first = panel.querySelector('.abr-tab');
                 if (first) first.focus();
             });
         },
@@ -2339,19 +3197,29 @@ if (typeof window.a11yBookReader === 'undefined') {
             var self = this;
             var panel = document.createElement('div');
             panel.id = 'abr-bookmap';
-            panel.setAttribute('role', 'group');
+            // A true modal dialog (same presentation + focus trap as Settings) —
+            // role=group under-announced it and SRs didn't switch to dialog mode.
+            panel.setAttribute('role', 'dialog');
+            panel.setAttribute('aria-modal', 'true');
             panel.setAttribute('aria-label', 'Book navigation');
             panel.setAttribute('hidden', '');
+            panel.className = 'abr-modal'; // same centered-card style as Settings
+            panel.addEventListener('click', function (e) { if (e.target === panel) self._toggleBookMap(); });
+
+            var card = document.createElement('div');
+            card.className = 'abr-modal-card';
+            card.appendChild(self._mkPanelHeader('Book navigation',
+                function () { self._toggleBookMap(); }));
 
             var tabs = document.createElement('div');
-            tabs.className = 'abr-map-tabs';
+            tabs.className = 'abr-tablist';
             tabs.setAttribute('role', 'tablist');
             tabs.setAttribute('aria-label', 'Navigation sections');
             var defs = [['toc', 'Contents'], ['search', 'Search'], ['pages', 'Pages'], ['landmarks', 'Landmarks'], ['goto', 'Go to']];
             defs.forEach(function (t) {
                 var b = document.createElement('button');
                 b.type = 'button';
-                b.className = 'abr-map-tab';
+                b.className = 'abr-tab';
                 b.id = 'abr-tab-' + t[0];
                 b.setAttribute('role', 'tab');
                 b.dataset.tab = t[0];
@@ -2379,14 +3247,16 @@ if (typeof window.a11yBookReader === 'undefined') {
                 });
                 tabs.appendChild(b);
             });
-            panel.appendChild(tabs);
+            card.appendChild(tabs);
 
             var body = document.createElement('div');
             body.id = 'abr-map-body';
+            body.className = 'abr-modal-body';
             body.setAttribute('role', 'tabpanel');
             body.setAttribute('aria-labelledby', 'abr-tab-toc');
             body.setAttribute('tabindex', '0');
-            panel.appendChild(body);
+            card.appendChild(body);
+            panel.appendChild(card);
             return panel;
         },
 
@@ -2395,7 +3265,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             self._bookMapTab = tab;
             var body = document.getElementById('abr-map-body');
             if (!body || !self._nav) return;
-            document.querySelectorAll('.abr-map-tab').forEach(function (b) {
+            document.querySelectorAll('#abr-bookmap .abr-tab').forEach(function (b) {
                 var sel = b.dataset.tab === tab;
                 b.setAttribute('aria-selected', sel ? 'true' : 'false');
                 b.tabIndex = sel ? 0 : -1;
@@ -2730,24 +3600,6 @@ if (typeof window.a11yBookReader === 'undefined') {
             } catch (e) { render(null); }
         },
 
-        // ── Colophon Panel (display settings UI) ─────────────────────────────
-
-        _toggleColophon: function () {
-            var panel = document.getElementById('abr-colophon');
-            var btn = document.getElementById('abr-colophon-btn');
-            if (!panel) return;
-            var opening = panel.hasAttribute('hidden');
-            if (opening) {
-                panel.removeAttribute('hidden');
-                if (btn) btn.setAttribute('aria-expanded', 'true');
-                var first = panel.querySelector('button, input, select');
-                if (first) first.focus();
-            } else {
-                panel.setAttribute('hidden', '');
-                if (btn) { btn.setAttribute('aria-expanded', 'false'); btn.focus(); }
-            }
-        },
-
         // Stepper control: − [value] + with live announce
         _mkStepper: function (label, key, min, max, step, fmt) {
             var self = this;
@@ -2760,6 +3612,9 @@ if (typeof window.a11yBookReader === 'undefined') {
             lab.textContent = label;
             var out = document.createElement('output');
             out.className = 'abr-col-value';
+            // <output> implies role=status/aria-live, but support is patchy
+            // (TV browsers, older VoiceOver) — make the announce explicit.
+            out.setAttribute('aria-live', 'polite');
             out.textContent = fmt(self._ds[key]);
             function mk(delta, name, icon) {
                 var b = document.createElement('button');
@@ -2813,56 +3668,316 @@ if (typeof window.a11yBookReader === 'undefined') {
                 });
                 row.appendChild(b);
             });
+            return this._wireRadiogroup(row);
+        },
+
+        // APG radio-group keyboard pattern, shared by every radiogroup row
+        // (_mkChoices, _mkViewModeChoice, _mkThemeSwatches): roving tabindex —
+        // the checked (or first) radio is the group's single Tab stop — and
+        // arrows that move AND select, delegating to each radio's own click
+        // handler so the real selection logic isn't duplicated here.
+        _wireRadiogroup: function (row) {
+            function radios() {
+                return Array.prototype.slice.call(row.querySelectorAll('[role="radio"]'));
+            }
+            function rove() {
+                var rs = radios();
+                var on = rs.findIndex(function (r) { return r.getAttribute('aria-checked') === 'true'; });
+                if (on < 0) on = 0;
+                rs.forEach(function (r, i) { r.tabIndex = i === on ? 0 : -1; });
+            }
+            rove();
+            row.addEventListener('keydown', function (e) {
+                var rs = radios();
+                var i = rs.indexOf(document.activeElement);
+                if (i < 0) return;
+                var n = -1;
+                if (e.key === 'ArrowRight' || e.key === 'ArrowDown') n = (i + 1) % rs.length;
+                else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') n = (i - 1 + rs.length) % rs.length;
+                else if (e.key === 'Home') n = 0;
+                else if (e.key === 'End') n = rs.length - 1;
+                if (n < 0) return;
+                e.preventDefault();
+                e.stopPropagation(); // don't let the global arrow handler also fire
+                rs[n].click();       // arrows select (APG): click owns aria-checked
+                rove();              // re-park the Tab stop on the new selection
+                rs[n].focus();
+            });
             return row;
         },
 
-        _buildColophon: function () {
-            var self = this;
-            var panel = document.createElement('div');
-            panel.id = 'abr-colophon';
-            panel.setAttribute('role', 'group');
-            panel.setAttribute('aria-label', 'Display settings');
-            panel.setAttribute('hidden', '');
+        // A panel header with a title and a Done button — gives touch users a
+        // visible way to dismiss popups (keyboard/TV use Escape).
+        // Close every popup panel except the one named — only one open at a time
+        _closeOtherPanels: function (keep) {
+            if (keep !== 'bookmap') {
+                var m = document.getElementById('abr-bookmap');
+                if (m && !m.hasAttribute('hidden')) {
+                    m.setAttribute('hidden', '');
+                    var mb = document.getElementById('abr-bookmap-btn');
+                    if (mb) mb.setAttribute('aria-expanded', 'false');
+                }
+            }
+            if (keep !== 'settings') {
+                var s = document.getElementById('abr-settings');
+                if (s && !s.hasAttribute('hidden')) {
+                    s.setAttribute('hidden', '');
+                    var sb = document.getElementById('abr-settings-btn');
+                    if (sb) sb.setAttribute('aria-expanded', 'false');
+                }
+            }
+        },
 
-            // Type
-            panel.appendChild(self._mkChoices('Font', 'FontFamily', [
+        _mkPanelHeader: function (title, closeFn) {
+            var header = document.createElement('div');
+            header.className = 'abr-panel-header';
+            var h = document.createElement('span');
+            h.className = 'abr-panel-title';
+            h.textContent = title;
+            var done = document.createElement('button');
+            done.type = 'button';
+            done.className = 'abr-panel-close';
+            done.innerHTML = '<span class="material-icons" aria-hidden="true">close</span>';
+            done.setAttribute('aria-label', 'Close ' + title);
+            done.addEventListener('click', closeFn);
+            header.appendChild(h);
+            header.appendChild(done);
+            return header;
+        },
+
+        // ── Settings modal (Bookshare-style tabbed dialog) ───────────────────
+        // Single modal for all reader preferences — display, audio, and motion —
+        // organized into Text / Page / Audio / Color tabs. Reuses _mkChoices /
+        // _mkStepper and the voice/speed handlers.
+        _buildSettingsModal: function () {
+            var self = this;
+            var modal = document.createElement('div');
+            modal.id = 'abr-settings';
+            modal.className = 'abr-modal';
+            modal.setAttribute('role', 'dialog');
+            modal.setAttribute('aria-modal', 'true');
+            modal.setAttribute('aria-label', 'Settings');
+            modal.setAttribute('hidden', '');
+
+            var card = document.createElement('div');
+            card.className = 'abr-modal-card';
+            card.appendChild(self._mkPanelHeader('Settings', function () { self._closeSettingsModal(); }));
+
+            var TABS = [{ id: 'text', label: 'Text' }, { id: 'page', label: 'Page' },
+                        { id: 'audio', label: 'Audio' }, { id: 'color', label: 'Color' }];
+            var tablist = document.createElement('div');
+            tablist.className = 'abr-tablist';
+            tablist.setAttribute('role', 'tablist');
+            tablist.setAttribute('aria-label', 'Settings sections');
+            TABS.forEach(function (t, i) {
+                var tab = document.createElement('button');
+                tab.type = 'button';
+                tab.className = 'abr-tab';
+                tab.id = 'abr-tab-' + t.id;
+                tab.setAttribute('role', 'tab');
+                tab.setAttribute('aria-controls', 'abr-tabpanel-' + t.id);
+                tab.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+                tab.tabIndex = i === 0 ? 0 : -1;
+                tab.textContent = t.label;
+                tab.addEventListener('click', function () { self._settingsTab(t.id); });
+                // Full APG tablist keys, same as the Book-Map tablist: arrows
+                // (both axes, for TV d-pad too) plus Home/End.
+                tab.addEventListener('keydown', function (e) {
+                    var n = -1;
+                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') n = (i + 1) % TABS.length;
+                    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') n = (i - 1 + TABS.length) % TABS.length;
+                    else if (e.key === 'Home') n = 0;
+                    else if (e.key === 'End') n = TABS.length - 1;
+                    if (n < 0) return;
+                    e.preventDefault();
+                    e.stopPropagation(); // don't let the global arrow handler also fire
+                    self._settingsTab(TABS[n].id);
+                    var nt = document.getElementById('abr-tab-' + TABS[n].id);
+                    if (nt) nt.focus();
+                });
+                tablist.appendChild(tab);
+            });
+            card.appendChild(tablist);
+
+            var body = document.createElement('div');
+            body.className = 'abr-modal-body';
+            var panels = {};
+            TABS.forEach(function (t, i) {
+                var p = document.createElement('div');
+                p.id = 'abr-tabpanel-' + t.id;
+                p.className = 'abr-tabpanel';
+                p.setAttribute('role', 'tabpanel');
+                p.setAttribute('aria-labelledby', 'abr-tab-' + t.id);
+                if (i !== 0) p.setAttribute('hidden', '');
+                panels[t.id] = p;
+                body.appendChild(p);
+            });
+            card.appendChild(body);
+
+            // Text
+            panels.text.appendChild(self._mkChoices('Font', 'FontFamily', [
                 { value: 'publisher', label: 'Book' },
                 { value: 'serif', label: 'Serif', style: 'font-family:Georgia,serif' },
                 { value: 'sans', label: 'Sans', style: 'font-family:system-ui,sans-serif' },
                 { value: 'opendyslexic', label: 'OpenDyslexic' }
             ]));
-            panel.appendChild(self._mkStepper('Text size', 'FontSizePct', 70, 250, 10,
-                function (v) { return v + '%'; }));
-            panel.appendChild(self._mkStepper('Line spacing', 'LineHeightPct', 100, 250, 10,
-                function (v) { return (v / 100).toFixed(1); }));
-            panel.appendChild(self._mkStepper('Letter spacing', 'LetterSpacing', 0, 25, 1,
-                function (v) { return (v / 100).toFixed(2) + 'em'; }));
-            panel.appendChild(self._mkStepper('Word spacing', 'WordSpacing', 0, 50, 5,
-                function (v) { return (v / 100).toFixed(2) + 'em'; }));
-            panel.appendChild(self._mkStepper('Paragraph spacing', 'ParaSpacingPct', 100, 300, 25,
-                function (v) { return v + '%'; }));
-            panel.appendChild(self._mkStepper('Margins', 'MarginPct', 2, 20, 2,
-                function (v) { return v + '%'; }));
-            panel.appendChild(self._mkChoices('Alignment', 'Align', [
-                { value: 'left', label: 'Left' },
-                { value: 'justify', label: 'Justified' }
+            panels.text.appendChild(self._mkStepper('Text size', 'FontSizePct', 70, 250, 10, function (v) { return v + '%'; }));
+            panels.text.appendChild(self._mkStepper('Line spacing', 'LineHeightPct', 100, 250, 10, function (v) { return (v / 100).toFixed(1); }));
+            panels.text.appendChild(self._mkStepper('Letter spacing', 'LetterSpacing', 0, 25, 1, function (v) { return (v / 100).toFixed(2) + 'em'; }));
+            panels.text.appendChild(self._mkStepper('Word spacing', 'WordSpacing', 0, 50, 5, function (v) { return (v / 100).toFixed(2) + 'em'; }));
+            panels.text.appendChild(self._mkStepper('Paragraph spacing', 'ParaSpacingPct', 100, 300, 25, function (v) { return v + '%'; }));
+            panels.text.appendChild(self._mkChoices('Alignment', 'Align', [
+                { value: 'left', label: 'Left' }, { value: 'justify', label: 'Justified' }
             ]));
 
-            // Theme
-            panel.appendChild(self._mkChoices('Theme', 'Theme', [
-                { value: 'light', label: 'Light' },
-                { value: 'dark', label: 'Dark' },
-                { value: 'sepia', label: 'Sepia' },
-                { value: 'contrast', label: 'High contrast' },
-                { value: 'custom', label: 'Custom' }
-            ], function (v) { self._syncCustomRow(); }));
+            // Page
+            panels.page.appendChild(self._mkViewModeChoice());
+            panels.page.appendChild(self._mkStepper('Margins', 'MarginPct', 2, 20, 2, function (v) { return v + '%'; }));
+            panels.page.appendChild(self._mkToggle('Reading ruler', 'Ruler', function (on) {
+                self._rulerOn = on;
+                var ruler = document.getElementById('abr-ruler');
+                if (ruler) ruler.toggleAttribute('hidden', !on);
+            }));
+            panels.page.appendChild(self._mkToggle('Reduce motion', 'ReducedMotion', function (on) {
+                self._reducedMotion = on; self._applyDisplaySettings();
+            }));
 
-            // Custom colors + live contrast readout
-            var custom = document.createElement('div');
-            custom.id = 'abr-col-custom';
-            custom.className = 'abr-col-row';
-            custom.setAttribute('role', 'group');
-            custom.setAttribute('aria-label', 'Custom colors');
+            // Audio
+            self._buildAudioControls(panels.audio);
+
+            // Color
+            panels.color.appendChild(self._mkThemeSwatches());
+            panels.color.appendChild(self._mkColorRows());
+
+            var footer = document.createElement('div');
+            footer.className = 'abr-modal-footer';
+            var reset = document.createElement('button');
+            reset.type = 'button';
+            reset.className = 'abr-col-choice';
+            reset.textContent = 'Reset to defaults';
+            reset.addEventListener('click', function () { self._resetSettings(); });
+            footer.appendChild(reset);
+            card.appendChild(footer);
+
+            modal.appendChild(card);
+            modal.addEventListener('click', function (e) { if (e.target === modal) self._closeSettingsModal(); });
+            return modal;
+        },
+
+        _settingsTab: function (id) {
+            ['text', 'page', 'audio', 'color'].forEach(function (t) {
+                var tab = document.getElementById('abr-tab-' + t);
+                var panel = document.getElementById('abr-tabpanel-' + t);
+                var on = t === id;
+                if (tab) { tab.setAttribute('aria-selected', on ? 'true' : 'false'); tab.tabIndex = on ? 0 : -1; }
+                if (panel) panel.toggleAttribute('hidden', !on);
+            });
+        },
+
+        _openSettingsModal: function () {
+            var m = document.getElementById('abr-settings');
+            if (!m) return;
+            this._closeOtherPanels && this._closeOtherPanels('settings');
+            m.removeAttribute('hidden');
+            var btn = document.getElementById('abr-settings-btn');
+            if (btn) btn.setAttribute('aria-expanded', 'true');
+            var first = document.getElementById('abr-tab-text');
+            if (first) first.focus();
+        },
+
+        _closeSettingsModal: function () {
+            var m = document.getElementById('abr-settings');
+            if (m) m.setAttribute('hidden', '');
+            var btn = document.getElementById('abr-settings-btn');
+            if (btn) { btn.setAttribute('aria-expanded', 'false'); btn.focus(); }
+        },
+
+        // View-mode radio group for the Page tab. Uses _setViewMode (the real
+        // switch), not _mkChoices (which only writes a display setting).
+        _mkViewModeChoice: function () {
+            var self = this;
+            var row = document.createElement('div');
+            row.id = 'abr-viewmode-choice';
+            row.className = 'abr-col-row';
+            row.setAttribute('role', 'radiogroup');
+            row.setAttribute('aria-label', 'View mode');
+            var lab = document.createElement('span');
+            lab.className = 'abr-col-label';
+            lab.textContent = 'View';
+            row.appendChild(lab);
+            [['page', 'Page'], ['chapter', 'Chapter'], ['scroll', 'Scroll']].forEach(function (o) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'abr-col-choice';
+                b.setAttribute('role', 'radio');
+                b.dataset.value = o[0];
+                b.setAttribute('aria-checked', self._viewMode === o[0] ? 'true' : 'false');
+                b.textContent = o[1];
+                b.addEventListener('click', function () { self._setViewMode(o[0]); });
+                row.appendChild(b);
+            });
+            return this._wireRadiogroup(row);
+        },
+
+        _mkToggle: function (label, key, onChange) {
+            var self = this;
+            var row = document.createElement('div');
+            row.className = 'abr-col-row';
+            var b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'abr-col-choice';
+            b.setAttribute('aria-pressed', self._ds[key] ? 'true' : 'false');
+            b.textContent = label;
+            b.addEventListener('click', function () {
+                self._ds[key] = !self._ds[key];
+                b.setAttribute('aria-pressed', self._ds[key] ? 'true' : 'false');
+                if (onChange) onChange(self._ds[key]);
+                self._saveDisplaySettings();
+            });
+            row.appendChild(b);
+            return row;
+        },
+
+        // Theme presets as preview swatches (sample text in each palette).
+        _mkThemeSwatches: function () {
+            var self = this;
+            var row = document.createElement('div');
+            row.className = 'abr-col-row abr-swatch-row';
+            row.setAttribute('role', 'radiogroup');
+            row.setAttribute('aria-label', 'Color theme');
+            var presets = [['light', 'Light'], ['dark', 'Dark'], ['sepia', 'Sepia'],
+                           ['contrast', 'High contrast'], ['custom', 'Custom']];
+            presets.forEach(function (p) {
+                var th = self._themes[p[0]];
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'abr-swatch';
+                b.dataset.value = p[0];
+                b.setAttribute('role', 'radio');
+                b.setAttribute('aria-checked', self._ds.Theme === p[0] ? 'true' : 'false');
+                b.setAttribute('aria-label', p[1]);
+                if (th) {
+                    b.style.background = th.bg; b.style.color = th.fg;
+                    b.innerHTML = '<span class="abr-swatch-sample" aria-hidden="true">Aa</span>' +
+                                  '<span class="abr-swatch-name">' + p[1] + '</span>';
+                } else { b.textContent = p[1]; } // custom
+                b.addEventListener('click', function () {
+                    self._ds.Theme = p[0];
+                    row.querySelectorAll('[role="radio"]').forEach(function (r) {
+                        r.setAttribute('aria-checked', r.dataset.value === p[0] ? 'true' : 'false');
+                    });
+                    self._syncCustomRow();
+                    self._applyDisplaySettings();
+                });
+                row.appendChild(b);
+            });
+            return this._wireRadiogroup(row);
+        },
+
+        // Custom fg/bg (with live contrast) + read-aloud highlight colors.
+        _mkColorRows: function () {
+            var self = this;
+            var frag = document.createDocumentFragment();
             function colorInput(label, key) {
                 var wrap = document.createElement('label');
                 wrap.className = 'abr-col-color';
@@ -2877,10 +3992,14 @@ if (typeof window.a11yBookReader === 'undefined') {
                     self._updateContrastReadout();
                     self._applyDisplaySettings();
                 });
-                wrap.appendChild(txt);
-                wrap.appendChild(inp);
+                wrap.appendChild(txt); wrap.appendChild(inp);
                 return wrap;
             }
+            var custom = document.createElement('div');
+            custom.id = 'abr-col-custom';
+            custom.className = 'abr-col-row';
+            custom.setAttribute('role', 'group');
+            custom.setAttribute('aria-label', 'Custom colors');
             custom.appendChild(colorInput('Text color', 'CustomFg'));
             custom.appendChild(colorInput('Background color', 'CustomBg'));
             var ratio = document.createElement('span');
@@ -2888,27 +4007,108 @@ if (typeof window.a11yBookReader === 'undefined') {
             ratio.setAttribute('role', 'status');
             ratio.setAttribute('aria-live', 'polite');
             custom.appendChild(ratio);
-            panel.appendChild(custom);
+            frag.appendChild(custom);
 
-            // Reduced motion
-            var motion = document.createElement('div');
-            motion.className = 'abr-col-row';
-            var motionBtn = document.createElement('button');
-            motionBtn.type = 'button';
-            motionBtn.className = 'abr-col-choice';
-            motionBtn.setAttribute('aria-pressed', self._ds.ReducedMotion ? 'true' : 'false');
-            motionBtn.textContent = 'Reduce motion';
-            motionBtn.addEventListener('click', function () {
-                self._ds.ReducedMotion = !self._ds.ReducedMotion;
-                motionBtn.setAttribute('aria-pressed', self._ds.ReducedMotion ? 'true' : 'false');
-                self._applyDisplaySettings();
-            });
-            motion.appendChild(motionBtn);
-            panel.appendChild(motion);
-
-            // Initial visibility/readout state
+            var hl = document.createElement('div');
+            hl.className = 'abr-col-row';
+            hl.setAttribute('role', 'group');
+            hl.setAttribute('aria-label', 'Read-aloud highlight colors');
+            var hlLab = document.createElement('span');
+            hlLab.className = 'abr-col-label';
+            hlLab.textContent = 'Read-aloud highlight';
+            hl.appendChild(hlLab);
+            hl.appendChild(colorInput('Highlighted text', 'HlFg'));
+            hl.appendChild(colorInput('Highlight background', 'HlBg'));
+            frag.appendChild(hl);
             setTimeout(function () { self._syncCustomRow(); }, 0);
-            return panel;
+            return frag;
+        },
+
+        // Voice + speed controls for the Audio tab (canonical home; the old
+        // toolbar TTS-settings panel is removed in the redesign).
+        _buildAudioControls: function (container) {
+            var self = this;
+            var speedGroup = document.createElement('div');
+            speedGroup.className = 'abr-settings-group';
+            var speedLabel = document.createElement('label');
+            speedLabel.setAttribute('for', 'abr-speed-select');
+            speedLabel.className = 'abr-settings-label';
+            speedLabel.textContent = 'Speed';
+            var speedSelect = document.createElement('select');
+            speedSelect.id = 'abr-speed-select';
+            speedSelect.className = 'abr-speed-select';
+            speedSelect.setAttribute('aria-label', 'Reading speed');
+            [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0].forEach(function (r) {
+                var opt = document.createElement('option');
+                opt.value = String(r); opt.textContent = r + '×';
+                if (r === self._ttsRate) opt.selected = true;
+                speedSelect.appendChild(opt);
+            });
+            speedSelect.addEventListener('change', function () {
+                self._ttsRate = parseFloat(speedSelect.value);
+                if (self._ds) { self._ds.TtsRatePct = Math.round(self._ttsRate * 100); self._saveDisplaySettings(); }
+                if (self._ttsPlaying && !self._ttsPaused) {
+                    if (self._piperAudio) {
+                        if (self._piperLastAbs != null) self._ttsCharOffset = self._piperLastAbs;
+                        self._stopPiperTts(); self._ttsPlaying = false; self._startTts();
+                    } else if (self._isTvVoice()) {
+                        self._stopTvTts(); self._ttsPlaying = false; self._startTts();
+                    } else if (typeof window.speechSynthesis !== 'undefined') {
+                        self._ttsCharOffset += self._ttsLastBoundary; self._ttsLastBoundary = 0;
+                        window.speechSynthesis.cancel(); self._ttsPlaying = false;
+                        self._ttsUtterance = null; self._startTts();
+                    }
+                }
+            });
+            speedGroup.appendChild(speedLabel); speedGroup.appendChild(speedSelect);
+
+            var voiceGroup = document.createElement('div');
+            voiceGroup.className = 'abr-settings-group';
+            var voiceLabel = document.createElement('label');
+            voiceLabel.setAttribute('for', 'abr-voice-select');
+            voiceLabel.className = 'abr-settings-label';
+            voiceLabel.textContent = 'Voice';
+            var voiceSelect = document.createElement('select');
+            voiceSelect.id = 'abr-voice-select';
+            voiceSelect.className = 'abr-voice-select';
+            voiceSelect.addEventListener('change', function () {
+                self._ttsVoiceURI = voiceSelect.value;
+                self._saveSettings();
+                if (!self._ttsPlaying && !self._ttsPaused) return;
+                if (self._piperAudio) {
+                    if (self._piperLastAbs != null) self._ttsCharOffset = self._piperLastAbs;
+                } else if (self._hlTicker && self._hlTickLast != null) {
+                    self._ttsCharOffset = self._hlTickLast;
+                } else {
+                    self._ttsCharOffset += self._ttsLastBoundary;
+                }
+                self._ttsLastBoundary = 0;
+                self._stopHlTicker(); self._stopPiperTts(); self._stopTvTts();
+                if (typeof window.speechSynthesis !== 'undefined') window.speechSynthesis.cancel();
+                self._ttsUtterance = null;
+                if (self._ttsPlaying && !self._ttsPaused) { self._ttsPlaying = false; self._startTts(); }
+            });
+            voiceGroup.appendChild(voiceLabel); voiceGroup.appendChild(voiceSelect);
+
+            container.appendChild(speedGroup);
+            container.appendChild(voiceGroup);
+        },
+
+        _resetSettings: function () {
+            var d = this._dsDefaults;
+            for (var k in d) if (Object.prototype.hasOwnProperty.call(d, k)) this._ds[k] = d[k];
+            this._saveDisplaySettings();
+            this._applyDisplaySettings();
+            // Rebuild the modal so every control reflects the reset values
+            var old = document.getElementById('abr-settings');
+            if (old && old.parentNode) {
+                var fresh = this._buildSettingsModal();
+                old.parentNode.replaceChild(fresh, old);
+                fresh.removeAttribute('hidden');
+                this._populateVoices();
+                var t = document.getElementById('abr-tab-text');
+                if (t) t.focus();
+            }
         },
 
         _syncCustomRow: function () {
@@ -3139,22 +4339,46 @@ if (typeof window.a11yBookReader === 'undefined') {
             return null;
         },
 
-        // Block elements that anchor a reading position (layout-independent)
+        // Block elements that anchor a reading position (layout-independent).
+        // Memoized per synchronous turn: a single nav press queries this 4–5×
+        // over the same unchanged doc.body. The block set only mutates across
+        // event-loop turns (chapter load, scroll section load/trim — all async),
+        // so the cached NodeList is valid for the duration of the current turn.
+        // A microtask clears it, which is the one invalidation that can't miss a
+        // mutation: it always runs before the next macrotask that could mutate.
         _getBlocks: function (doc) {
-            return doc.body.querySelectorAll(
+            if (this._blocksCache && this._blocksCache.doc === doc) return this._blocksCache.list;
+            var list = doc.body.querySelectorAll(
                 'p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, figure, dt, dd');
+            this._blocksCache = { doc: doc, list: list };
+            if (!this._blocksCacheScheduled) {
+                this._blocksCacheScheduled = true;
+                var self = this;
+                Promise.resolve().then(function () {
+                    self._blocksCache = null;
+                    self._blocksCacheScheduled = false;
+                });
+            }
+            return list;
         },
 
         // Index of the first block on the current page / in the viewport.
         // Paged mode uses offsetLeft (layout geometry — immune to the
         // mid-animation transform); scroll mode uses viewport rects.
         _firstVisiblePara: function () {
+            if (this._viewMode === 'scroll') {
+                try {
+                    var sdoc = document.getElementById('abr-frame').contentDocument;
+                    var sinfo = this._scrollActiveInfo(sdoc);
+                    return sinfo ? sinfo.para : null;
+                } catch (e) { return null; }
+            }
             try {
                 var frame = document.getElementById('abr-frame');
                 var doc = frame.contentDocument;
                 var blocks = this._getBlocks(doc);
                 var i;
-                if (this._viewMode === 'paged') {
+                if (this._viewMode === 'page') {
                     var pageStart = this._page * this._pageStep;
                     for (i = 0; i < blocks.length; i++) {
                         // First block whose column lies at or beyond this page
@@ -3179,7 +4403,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                 var blocks = this._getBlocks(doc);
                 if (para == null || para < 0 || para >= blocks.length) return false;
                 var el = blocks[para];
-                if (this._viewMode === 'paged') {
+                if (this._viewMode === 'page') {
                     this._goToPage(Math.min(this._pageCount - 1,
                         Math.max(0, Math.round(el.offsetLeft / this._pageStep))), true);
                 } else {
@@ -3193,8 +4417,15 @@ if (typeof window.a11yBookReader === 'undefined') {
 
         _currentScrollFraction: function () {
             // Paged mode: position is the page index, not a scroll offset
-            if (this._viewMode === 'paged') {
+            if (this._viewMode === 'page') {
                 return this._pageCount > 1 ? this._page / (this._pageCount - 1) : 0;
+            }
+            if (this._viewMode === 'scroll') {
+                try {
+                    var sdoc = document.getElementById('abr-frame').contentDocument;
+                    var sinfo = this._scrollActiveInfo(sdoc);
+                    return sinfo ? this._sectionFraction(sinfo.section) : 0;
+                } catch (e) { return 0; }
             }
             try {
                 var frame = document.getElementById('abr-frame');
@@ -3255,7 +4486,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                     // if the user deliberately navigates away first)
                     self._ttsStartPara = target;
                     if (!self._goToPara(target) && f !== null) {
-                        if (self._viewMode === 'paged') {
+                        if (self._viewMode === 'page') {
                             self._goToPage(Math.round(f * (self._pageCount - 1)), true);
                         } else {
                             var max = doc.scrollHeight - doc.clientHeight;

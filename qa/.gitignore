@@ -1,0 +1,9 @@
+# Local-only credentials — NEVER commit
+config.local.js
+
+# Dependencies
+node_modules/
+
+# Test artifacts
+*.png
+screenshots/

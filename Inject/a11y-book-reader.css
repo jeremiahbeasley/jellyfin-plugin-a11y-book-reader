@@ -16,15 +16,32 @@
 #abr-toolbar {
     display: flex;
     align-items: center;
-    gap: 12px;
+    flex-wrap: wrap; /* controls reflow to new rows instead of clipping (WCAG 1.4.10) */
+    gap: 8px;
     padding: 10px 16px;
+    padding-right: 56px; /* keep content clear of the pinned Close button */
     background: rgba(0, 0, 0, 0.55);
     border-bottom: 1px solid rgba(127, 127, 127, 0.25);
     flex-shrink: 0;
 }
 
+/* Reader Close — pinned to the overlay's top-right, always reachable */
+#abr-close {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    z-index: 6;
+    min-width: 44px;
+    min-height: 44px; /* WCAG 2.5.8 */
+    background: color-mix(in srgb, var(--abr-page-bg, #000) 70%, transparent);
+    border-radius: 8px;
+}
+
+#abr-overlay { position: fixed; } /* (already fixed) — anchor for the close button */
+
 .abr-title-text {
     flex: 1;
+    min-width: 0; /* allow the title to shrink so it never forces overflow */
     font-size: 1rem;
     font-weight: 600;
     color: inherit;
@@ -118,6 +135,129 @@
     color: inherit;
 }
 
+/* ─── Rotor ("Navigate by") ──────────────────────────────────────────── */
+.abr-rotor {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+    font-size: 0.85rem;
+    color: inherit;
+}
+.abr-rotor-label {
+    color: inherit; /* full contrast — never dimmed (project rule) */
+    white-space: nowrap;
+}
+.abr-rotor-select {
+    color: inherit;
+    background: rgba(127, 127, 127, 0.14);
+    border: 1px solid rgba(127, 127, 127, 0.45);
+    border-radius: 6px;
+    padding: 4px 8px;
+    min-height: 32px; /* WCAG 2.5.8 target size */
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+.abr-rotor-select option {
+    color: #1a1a1a;
+    background: #fff;
+}
+#abr-overlay.abr-themed .abr-rotor-select {
+    border-color: color-mix(in srgb, var(--abr-page-fg) 35%, transparent);
+}
+
+/* ─── Settings modal (tabbed) ────────────────────────────────────────── */
+.abr-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.5);
+    padding: 16px;
+}
+.abr-modal[hidden] { display: none; }
+.abr-modal-card {
+    width: min(560px, 100%);
+    height: min(620px, 90vh); /* fixed — body scrolls, no per-tab resize */
+    display: flex;
+    flex-direction: column;
+    background: var(--abr-page-bg, #1a1a1a);
+    color: var(--abr-page-fg, #fff);
+    border: 2px solid color-mix(in srgb, var(--abr-page-fg, #fff) 30%, transparent);
+    border-radius: 10px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+}
+.abr-tablist {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 8px 12px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--abr-page-fg, #fff) 22%, transparent);
+}
+.abr-tab {
+    background: transparent;
+    color: inherit;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    padding: 8px 14px;
+    min-height: 40px; /* WCAG 2.5.8 */
+    font-size: 0.95rem;
+    cursor: pointer;
+}
+.abr-tab[aria-selected="true"] {
+    background: color-mix(in srgb, var(--abr-page-fg, #fff) 14%, transparent);
+    border-color: color-mix(in srgb, var(--abr-page-fg, #fff) 25%, transparent);
+    font-weight: 700;
+}
+.abr-modal-body {
+    padding: 12px 16px;
+    overflow-y: auto;
+    flex: 1 1 auto; /* fill the fixed card height; scroll internally */
+}
+.abr-tabpanel[hidden] { display: none; }
+.abr-modal-footer {
+    padding: 10px 16px;
+    border-top: 1px solid color-mix(in srgb, var(--abr-page-fg, #fff) 22%, transparent);
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* Color-theme preview swatches */
+.abr-swatch-row { flex-wrap: wrap; gap: 8px; }
+.abr-swatch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: 84px;
+    min-height: 64px;
+    padding: 8px;
+    border: 2px solid color-mix(in srgb, var(--abr-page-fg, #fff) 30%, transparent);
+    border-radius: 8px;
+    cursor: pointer;
+}
+.abr-swatch[aria-checked="true"] {
+    /* Selection ring as box-shadow + border, NOT outline — the focus ring
+       (outline, #00a4dc) would replace an outline-based ring, hiding which
+       swatch is selected while keyboard-navigating the group (WCAG H4). */
+    box-shadow: 0 0 0 3px #ffd700;
+    border-color: #ffd700;
+}
+.abr-swatch-sample { font-size: 1.3rem; font-weight: 700; line-height: 1; }
+.abr-swatch-name { font-size: 0.75rem; }
+
+/* Bottom-bar audio cluster (skip-back · play · stop · skip-ahead) */
+.abr-audio-cluster {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
 /* ─── TTS button states ──────────────────────────────────────────────── */
 
 @keyframes abr-pulse {
@@ -141,21 +281,34 @@
     color: rgba(0, 164, 220, 0.65);
 }
 
-/* ─── TTS Settings panel ─────────────────────────────────────────────── */
-
-#abr-tts-settings {
+/* Panel header (close button) shared by the settings modal and book map */
+.abr-panel-header {
     display: flex;
     align-items: center;
-    gap: 24px;
-    padding: 10px 20px;
-    background: rgba(0, 0, 0, 0.45);
-    border-bottom: 1px solid rgba(127, 127, 127, 0.18);
-    flex-shrink: 0;
-    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 12px 16px 8px;
+    box-sizing: border-box;
 }
 
-#abr-tts-settings[hidden] {
-    display: none;
+.abr-panel-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+}
+
+.abr-panel-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 40px;
+    min-height: 40px; /* WCAG 2.5.8 */
+    padding: 4px;
+    border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: inherit;
+    cursor: pointer;
 }
 
 .abr-settings-group {
@@ -341,10 +494,6 @@
     width: 100%;
 }
 
-#abr-overlay.abr-immersive #abr-tts-settings {
-    display: none;
-}
-
 /* The obvious way back — faded but always findable, loud on focus */
 #abr-show-controls {
     position: absolute;
@@ -371,13 +520,6 @@
 
 #abr-show-controls[hidden] { display: none; }
 
-/* Pressed-state for the toolbar toggles */
-#abr-mode-toggle[aria-pressed="true"],
-#abr-ruler-toggle[aria-pressed="true"] {
-    background: color-mix(in srgb, var(--abr-ribbon) 22%, transparent);
-    color: var(--abr-ribbon);
-}
-
 .abr-nav-mid {
     display: flex;
     flex-direction: column;
@@ -386,13 +528,15 @@
     min-width: 0;
 }
 
-/* Reduced motion: kill every reader animation */
+/* Reduced motion: kill every reader animation/transition — the same blanket
+   rule as the in-app .abr-reduce setting, so the OS preference and the
+   in-app toggle behave identically (it previously only covered 3 elements,
+   leaving the immersive slide, spinner, and button transitions animating). */
 @media (prefers-reduced-motion: reduce) {
-    #abr-toolbar, #abr-nav, #abr-show-controls {
-        transition: none;
-    }
-    #abr-tts-toggle.abr-tts-active {
-        animation: none;
+    #abr-overlay *,
+    #abr-overlay {
+        transition: none !important;
+        animation: none !important;
     }
 }
 
@@ -406,9 +550,7 @@
 }
 
 #abr-overlay.abr-themed #abr-toolbar,
-#abr-overlay.abr-themed #abr-nav,
-#abr-overlay.abr-themed #abr-tts-settings,
-#abr-overlay.abr-themed #abr-colophon {
+#abr-overlay.abr-themed #abr-nav {
     background: color-mix(in srgb, var(--abr-page-bg) 94%, black);
     border-color: color-mix(in srgb, var(--abr-page-fg) 22%, transparent);
     color: var(--abr-page-fg);
@@ -417,21 +559,6 @@
 #abr-overlay.abr-themed #abr-frame {
     background: var(--abr-page-bg);
 }
-
-/* ─── Colophon Panel ─────────────────────────────────────────────────── */
-
-#abr-colophon {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(127, 127, 127, 0.25);
-    max-height: 46vh;
-    overflow-y: auto;
-    flex-shrink: 0;
-}
-
-#abr-colophon[hidden] { display: none; }
 
 .abr-col-row {
     display: flex;
@@ -512,50 +639,12 @@
 
 }
 
-#abr-overlay.abr-immersive #abr-colophon { display: none; }
+#abr-overlay.abr-immersive #abr-close { display: none; }
 
 /* ─── Book Map (Phase 3) ─────────────────────────────────────────────── */
 
-#abr-bookmap {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px 20px;
-    border-bottom: 1px solid rgba(127, 127, 127, 0.25);
-    max-height: 50vh;
-    flex-shrink: 0;
-}
-
-#abr-bookmap[hidden] { display: none; }
-
-#abr-overlay.abr-themed #abr-bookmap {
-    background: color-mix(in srgb, var(--abr-page-bg) 94%, black);
-    border-color: color-mix(in srgb, var(--abr-page-fg) 22%, transparent);
-    color: var(--abr-page-fg);
-}
-
-.abr-map-tabs {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-}
-
-.abr-map-tab {
-    min-height: 40px; /* WCAG 2.5.8 */
-    padding: 6px 16px;
-    border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
-    border-radius: 6px;
-    background: color-mix(in srgb, currentColor 8%, transparent);
-    color: inherit;
-    cursor: pointer;
-    font-size: 0.9rem;
-}
-
-.abr-map-tab[aria-selected="true"] {
-    background: color-mix(in srgb, var(--abr-ribbon) 25%, transparent);
-    border-color: var(--abr-ribbon);
-    font-weight: 600;
-}
+/* #abr-bookmap now uses the shared .abr-modal / .abr-modal-card styling
+   (centered card, themed via --abr-page-bg) — same as the Settings modal. */
 
 #abr-map-body {
     overflow-y: auto;
@@ -686,4 +775,72 @@
 #abr-overlay.abr-reduce {
     transition: none !important;
     animation: none !important;
+}
+
+/* ─── Responsive — reflow down to 320px (WCAG 1.4.10) ────────────────── */
+
+@media (max-width: 480px) {
+    /* Toolbar: title takes its own top row; controls wrap below it */
+    #abr-toolbar {
+        gap: 6px;
+        padding: 8px 10px;
+    }
+    .abr-title-text {
+        flex-basis: 100%;
+        order: -1;
+        font-size: 0.95rem;
+    }
+    .abr-chapter-info {
+        flex-basis: 100%;
+        order: -1;
+        font-size: 0.8rem;
+        white-space: normal;
+    }
+
+    /* Nav: collapse Previous/Next words to chevrons, tighten padding */
+    #abr-nav {
+        gap: 8px;
+        padding: 8px 10px;
+    }
+    .abr-nav-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+    .abr-nav-btn {
+        padding: 10px 12px;
+    }
+    .abr-nav-mid {
+        flex: 1;
+        min-width: 0;
+    }
+    #abr-page-info {
+        white-space: normal;
+        text-align: center;
+    }
+
+    /* Narrower labels so steppers/choices keep room */
+    .abr-col-label {
+        min-width: 7em;
+    }
+
+    /* Panels: cap height a little lower so the page stays visible */
+    #abr-bookmap {
+        max-height: 42vh;
+    }
+}
+
+@media (max-width: 360px) {
+    .abr-col-label {
+        flex-basis: 100%;
+        min-width: 0;
+    }
+    .abr-goto-input, .abr-voice-select {
+        flex: 1;
+        min-width: 0;
+        max-width: none;
+    }
 }

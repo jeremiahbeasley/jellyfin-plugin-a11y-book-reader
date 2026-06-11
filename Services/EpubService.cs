@@ -440,7 +440,10 @@ public class EpubService
         return results;
     }
 
-    public string? GetChapterHtml(Guid itemId, int index, string serverUrl)
+    // apiKey: the requester's own token, embedded in rewritten resource URLs —
+    // the iframe's subresource fetches can't send auth headers, so the
+    // resource endpoint authenticates via ?api_key= (the TTS stream pattern).
+    public string? GetChapterHtml(Guid itemId, int index, string? apiKey = null)
     {
         var epub = GetParsed(itemId);
         if (epub == null || index < 0 || index >= epub.Spine.Count) return null;
@@ -454,7 +457,7 @@ public class EpubService
         using (var reader = new StreamReader(entry.Open()))
             html = reader.ReadToEnd();
 
-        return RewriteUrlsForItem(html, chapter.ZipPath, itemId, serverUrl);
+        return RewriteUrlsForItem(html, chapter.ZipPath, itemId, apiKey);
     }
 
     public (Stream? Data, string ContentType) GetResource(Guid itemId, string path)
@@ -480,20 +483,26 @@ public class EpubService
         return (ms, mime);
     }
 
-    private string? RewriteUrlsForItem(string html, string chapterZipPath, Guid itemId, string serverUrl)
+    private string? RewriteUrlsForItem(string html, string chapterZipPath, Guid itemId, string? apiKey = null)
     {
         var epub = GetParsed(itemId);
         var spineByPath = epub?.Spine.ToDictionary(s => s.ZipPath, s => s.Index)
                           ?? new Dictionary<string, int>();
-        return RewriteUrls(html, chapterZipPath, itemId, serverUrl, spineByPath);
+        return RewriteUrls(html, chapterZipPath, itemId, spineByPath, apiKey);
     }
 
-    private static string RewriteUrls(string html, string chapterZipPath, Guid itemId, string serverUrl,
-        Dictionary<string, int> spineByPath)
+    private static string RewriteUrls(string html, string chapterZipPath, Guid itemId,
+        Dictionary<string, int> spineByPath, string? apiKey = null)
     {
         var chapterDir = chapterZipPath.Contains('/')
             ? chapterZipPath[..(chapterZipPath.LastIndexOf('/') + 1)]
             : string.Empty;
+
+        // The requester's own token rides along on each resource URL so the
+        // iframe's headerless subresource fetches can authenticate.
+        var keySuffix = string.IsNullOrEmpty(apiKey)
+            ? string.Empty
+            : "&api_key=" + Uri.EscapeDataString(apiKey);
 
         // Mirror epub:type onto data-epub-type so the client can read it
         // reliably (the namespaced attribute is awkward in HTML-parsed docs).
@@ -521,7 +530,7 @@ public class EpubService
                 return $"href=\"#\" data-abr-chapter=\"{spineIdx}\" data-abr-anchor=\"{System.Net.WebUtility.HtmlEncode(anchor)}\"";
             }
 
-            return $"{attr}=\"{serverUrl}/A11yBookReader/resource/{itemId}?path={Uri.EscapeDataString(resolved)}\"";
+            return $"{attr}=\"/A11yBookReader/resource/{itemId}?path={Uri.EscapeDataString(resolved)}{keySuffix}\"";
         });
 
         // Rewrite url(...) in inline styles
@@ -532,7 +541,7 @@ public class EpubService
                 url.StartsWith("data:", StringComparison.Ordinal))
                 return m.Value;
             var resolved = NormalizePath(chapterDir + url);
-            return $"url('{serverUrl}/A11yBookReader/resource/{itemId}?path={Uri.EscapeDataString(resolved)}')";
+            return $"url('/A11yBookReader/resource/{itemId}?path={Uri.EscapeDataString(resolved)}{keySuffix}')";
         });
 
         return html;

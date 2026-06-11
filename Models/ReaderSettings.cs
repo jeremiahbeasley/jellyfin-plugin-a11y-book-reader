@@ -40,17 +40,29 @@ public class ReaderSettings
     /// <summary>Custom background, #rrggbb (used when Theme == custom).</summary>
     public string? CustomBg { get; set; }
 
+    /// <summary>TTS highlight background color, #rrggbb.</summary>
+    public string? HlBg { get; set; }
+
+    /// <summary>TTS highlight text (foreground) color, #rrggbb.</summary>
+    public string? HlFg { get; set; }
+
     /// <summary>Explicit reduced-motion preference (layered over the OS media query).</summary>
     public bool ReducedMotion { get; set; }
 
-    /// <summary>paged | scroll.</summary>
-    public string ViewMode { get; set; } = "scroll";
+    /// <summary>page | chapter | scroll. (page = paged columns; chapter =
+    /// scroll within one chapter, chapter-by-chapter; scroll = full-book
+    /// continuous.) Legacy values paged/scroll migrate to page/chapter on load.</summary>
+    public string ViewMode { get; set; } = "chapter";
 
     /// <summary>Reading ruler enabled.</summary>
     public bool Ruler { get; set; }
 
     /// <summary>TTS rate ×100 (e.g. 150 = 1.5×). 25–300.</summary>
     public int TtsRatePct { get; set; } = 100;
+
+    /// <summary>Rotor unit that Prev/Next jumps by:
+    /// chapter | page | heading | paragraph | sentence.</summary>
+    public string NavUnit { get; set; } = "chapter";
 
     public DateTime Updated { get; set; }
 }

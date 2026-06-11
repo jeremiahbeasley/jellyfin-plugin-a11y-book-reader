@@ -131,7 +131,30 @@ public class PiperService
         }
 
         _logger.LogInformation("Piper installed to {Dir}", _binDir);
+
+        // Ship a working default voice with the engine: without one, a fresh
+        // install has ZERO voices and TTS silently routes to the browser/system
+        // default, which doesn't exist on TVs and headless platforms. A voice
+        // download failure must not roll back the binary install — the UI still
+        // offers manual voice downloads.
+        if (!HasVoice(DefaultVoiceKey))
+        {
+            try
+            {
+                await DownloadVoiceAsync(DefaultVoiceKey, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Default voice '{Key}' download failed; install it manually from the voice catalog", DefaultVoiceKey);
+            }
+        }
     }
+
+    /// <summary>Voice bundled automatically when Piper is installed.</summary>
+    public const string DefaultVoiceKey = "en_US-ryan-medium";
+
+    public bool HasVoice(string key) =>
+        !string.IsNullOrWhiteSpace(key) && GetDownloadedKeys().Contains(key);
 
     // ── Voice catalog ─────────────────────────────────────────────────────────
 
@@ -246,6 +269,168 @@ public class PiperService
         }
 
         return BuildWav(ms.ToArray(), sampleRate);
+    }
+
+    /// <summary>Raw 16-bit mono PCM for one text fragment (no WAV header), at 1x.</summary>
+    private async Task<byte[]> SynthesizePcmAsync(string text, string modelPath, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = BinaryPath,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add("--model");
+        psi.ArgumentList.Add(modelPath);
+        psi.ArgumentList.Add("--espeak-data");
+        psi.ArgumentList.Add(Path.Combine(_binDir, "espeak-ng-data"));
+        psi.ArgumentList.Add("--output-raw");
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var existing = Environment.GetEnvironmentVariable("LD_LIBRARY_PATH") ?? string.Empty;
+            psi.Environment["LD_LIBRARY_PATH"] = existing.Length > 0 ? $"{_binDir}:{existing}" : _binDir;
+        }
+        using var proc = new Process { StartInfo = psi };
+        proc.Start();
+        await proc.StandardInput.WriteAsync(text).ConfigureAwait(false);
+        proc.StandardInput.Close();
+        using var ms = new MemoryStream();
+        await proc.StandardOutput.BaseStream.CopyToAsync(ms, ct).ConfigureAwait(false);
+        await proc.WaitForExitAsync(ct).ConfigureAwait(false);
+        if (proc.ExitCode != 0)
+        {
+            var err = await proc.StandardError.ReadToEndAsync(ct).ConfigureAwait(false);
+            throw new InvalidOperationException($"Piper exited {proc.ExitCode}: {err}");
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>What StreamTimedAsync emits (iOS needs MP3 for live streams).</summary>
+    public string TimedStreamContentType => FfmpegPath != null ? "audio/mpeg" : "audio/wav";
+
+    /// <summary>
+    /// Stream the text as audio, synthesized sentence-by-sentence, recording each
+    /// sentence's REAL timing into <paramref name="spansOut"/>. Speed is BAKED in
+    /// (ffmpeg atempo) — iOS ignores playbackRate on live streams — and the spans
+    /// are in OUTPUT time (already divided by rate) so they align with the audio's
+    /// currentTime. First audio flushes after sentence 1; synthesis is ~15x
+    /// realtime so it stays far ahead of playback.
+    /// </summary>
+    public async Task StreamTimedAsync(string text, string voiceKey, double rate, Stream output,
+        List<SentenceSpan> spansOut, object spansLock, CancellationToken ct)
+    {
+        if (!IsInstalled()) throw new InvalidOperationException("Piper is not installed");
+        var modelPath = Path.Combine(_voicesDir, voiceKey + ".onnx");
+        if (!File.Exists(modelPath))
+            throw new InvalidOperationException($"Voice model '{voiceKey}' is not downloaded");
+        var sampleRate = ReadSampleRate(modelPath + ".json");
+        var ffmpegPath = FfmpegPath;
+        var clampedRate = Math.Clamp(rate, 0.25, 3.0);
+
+        long totalSamples = 0;
+        void RecordSpan(int len, int start, int end)
+        {
+            // Output media-time = 1x-time / rate (atempo compresses the audio).
+            int startMs = (int)(totalSamples * 1000.0 / sampleRate / clampedRate);
+            totalSamples += len / 2; // 16-bit mono
+            int endMs = (int)(totalSamples * 1000.0 / sampleRate / clampedRate);
+            lock (spansLock)
+                spansOut.Add(new SentenceSpan { CharStart = start, CharEnd = end, StartMs = startMs, EndMs = endMs });
+        }
+
+        // Need ffmpeg for atempo (exact speed, pitch preserved) and MP3 (iOS).
+        if (ffmpegPath == null)
+        {
+            // Fallback: raw WAV at 1x (desktop only; no speed without ffmpeg)
+            await output.WriteAsync(BuildStreamingWavHeader(sampleRate), ct).ConfigureAwait(false);
+            await output.FlushAsync(ct).ConfigureAwait(false);
+            foreach (var (sentence, start, end) in SplitSentences(text))
+            {
+                ct.ThrowIfCancellationRequested();
+                var pcm = await SynthesizePcmAsync(sentence, modelPath, ct).ConfigureAwait(false);
+                RecordSpan(pcm.Length, start, end);
+                await output.WriteAsync(pcm, 0, pcm.Length, ct).ConfigureAwait(false);
+                await output.FlushAsync(ct).ConfigureAwait(false);
+            }
+            return;
+        }
+
+        var fpsi = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        fpsi.ArgumentList.Add("-hide_banner");
+        fpsi.ArgumentList.Add("-loglevel"); fpsi.ArgumentList.Add("error");
+        fpsi.ArgumentList.Add("-f"); fpsi.ArgumentList.Add("s16le");
+        fpsi.ArgumentList.Add("-ar"); fpsi.ArgumentList.Add(sampleRate.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        fpsi.ArgumentList.Add("-ac"); fpsi.ArgumentList.Add("1");
+        fpsi.ArgumentList.Add("-i"); fpsi.ArgumentList.Add("pipe:0");
+        if (Math.Abs(clampedRate - 1.0) > 0.001)
+        {
+            fpsi.ArgumentList.Add("-af"); fpsi.ArgumentList.Add(BuildAtempoChain(clampedRate));
+        }
+        fpsi.ArgumentList.Add("-f"); fpsi.ArgumentList.Add("mp3");
+        fpsi.ArgumentList.Add("-b:a"); fpsi.ArgumentList.Add("64k");
+        fpsi.ArgumentList.Add("pipe:1");
+
+        using var ff = new Process { StartInfo = fpsi };
+        ff.Start();
+        var pump = Task.Run(async () =>
+        {
+            try { await ff.StandardOutput.BaseStream.CopyToAsync(output, ct).ConfigureAwait(false); }
+            catch { /* client closed */ }
+        }, ct);
+
+        try
+        {
+            foreach (var (sentence, start, end) in SplitSentences(text))
+            {
+                ct.ThrowIfCancellationRequested();
+                var pcm = await SynthesizePcmAsync(sentence, modelPath, ct).ConfigureAwait(false);
+                RecordSpan(pcm.Length, start, end);
+                await ff.StandardInput.BaseStream.WriteAsync(pcm, 0, pcm.Length, ct).ConfigureAwait(false);
+                await ff.StandardInput.BaseStream.FlushAsync(ct).ConfigureAwait(false);
+            }
+            ff.StandardInput.Close();
+            await pump.ConfigureAwait(false);
+            await ff.WaitForExitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            try { if (!ff.HasExited) ff.Kill(entireProcessTree: true); } catch { }
+        }
+    }
+
+    /// <summary>Split into sentences, yielding each with its char offsets in the source.</summary>
+    private static IEnumerable<(string Text, int Start, int End)> SplitSentences(string text)
+    {
+        int i = 0, n = text.Length;
+        while (i < n)
+        {
+            while (i < n && char.IsWhiteSpace(text[i])) i++;
+            if (i >= n) break;
+            int start = i;
+            while (i < n)
+            {
+                char c = text[i];
+                if (c is '.' or '!' or '?')
+                {
+                    int j = i + 1;
+                    while (j < n && (text[j] is '"' or '\'' or ')' or ']' or '”' or '’')) j++;
+                    if (j >= n || char.IsWhiteSpace(text[j])) { i = j; break; }
+                }
+                i++;
+            }
+            int end = i;
+            var s = text.Substring(start, end - start).Trim();
+            if (s.Length > 0) yield return (s, start, end);
+        }
     }
 
     // Jellyfin's bundled ffmpeg — used to encode the TTS stream as MP3.

@@ -1,0 +1,19 @@
+{
+  "name": "a11y-book-reader-qa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless-Chromium QA harness for the A11y Book Reader Jellyfin plugin (functional / WCAG a11y / responsive / TTS), run against a live Jellyfin server.",
+  "scripts": {
+    "qa": "node run-all.js",
+    "functional": "node tests/functional.js",
+    "a11y": "node tests/accessibility.js",
+    "responsive": "node tests/responsive.js",
+    "tts": "node tests/tts.js",
+    "multibook": "node tests/multibook.js",
+    "scroll": "node tests/scroll-follow.js"
+  },
+  "devDependencies": {
+    "axe-core": "^4.12.0",
+    "puppeteer": "^25.0.0"
+  }
+}
