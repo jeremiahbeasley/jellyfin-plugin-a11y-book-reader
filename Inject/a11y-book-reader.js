@@ -686,11 +686,24 @@ if (typeof window.a11yBookReader === 'undefined') {
                 self._pendingAnchor === null && self._pendingQuote === null) {
                 self._saveProgress(self._chapterIndex, 0, null);
             }
+            // Hide the frame until the reader styles and landing are applied —
+            // the chapter otherwise paints once with the publisher's CSS and
+            // visibly reflows into the user's font/spacing (jarring flash).
+            // visibility (not display) so layout still computes for pagination.
+            // Safety timer: a chapter that never fires onload must still reveal.
+            frame.style.visibility = 'hidden';
+            if (self._revealTimer) clearTimeout(self._revealTimer);
+            self._revealTimer = setTimeout(function () { frame.style.visibility = ''; }, 2500);
             frame.src = src;
 
             frame.onload = function () {
-                self._setupChapterView(frame);
-                self._restoreScrollAndTrack(frame);
+                try {
+                    self._setupChapterView(frame);
+                    self._restoreScrollAndTrack(frame);
+                } finally {
+                    if (self._revealTimer) { clearTimeout(self._revealTimer); self._revealTimer = null; }
+                    frame.style.visibility = '';
+                }
                 self._tvFocusSweep(document.getElementById('abr-overlay'));
                 // Auto-start TTS if continuous reading is active
                 if (self._ttsContinuous) {
@@ -844,8 +857,12 @@ if (typeof window.a11yBookReader === 'undefined') {
             // body.scrollWidth is unreliable once the body is translated). But take
             // the CURRENT page from what's ACTUALLY rendered (the transform), so a
             // stale _page from a view switch can't misfire a chapter jump.
+            // Include any residual root scroll (focus/selection drift) so the
+            // step lands back ON the grid instead of compounding the offset
+            var sl = 0;
+            try { sl = doc.documentElement.scrollLeft || 0; } catch (e) {}
             var m = (doc.body.style.transform || '').match(/-?\d+(?:\.\d+)?/);
-            var curPage = m ? Math.round(Math.abs(parseFloat(m[0])) / w) : (this._page || 0);
+            var curPage = m ? Math.round((Math.abs(parseFloat(m[0])) + sl) / w) : (this._page || 0);
             this._page = Math.max(0, Math.min(curPage, this._pageCount - 1));
             var target = this._page + delta;
             if (target >= 0 && target < this._pageCount) { this._goToPage(target); return; }
@@ -1179,9 +1196,29 @@ if (typeof window.a11yBookReader === 'undefined') {
                 });
             }
 
+            // Cover art SVGs ship preserveAspectRatio="none" sized for a fixed
+            // page; in a reflowed box that STRETCHES the art. "meet" letterboxes
+            // it instead, keeping the aspect ratio in any box. (Not expressible
+            // in CSS — preserveAspectRatio is an attribute, so rewrite it here.)
+            self._fixSvgAspect(doc);
+
             // Highlights & notes: selection popover + persistent highlight paint
             self._wireSelection(frame, doc);
             self._paintAnnotations(frame);
+
+            // Page view shows a clipped horizontal strip — the browser still
+            // auto-scrolls the clipped root on focus jumps, selection drags,
+            // and find-in-page. Any horizontal offset breaks the column grid
+            // (half a page each side), so snap it back: the body transform is
+            // the only legitimate horizontal motion.
+            if (!doc.abrAlignWired) {
+                doc.abrAlignWired = true;
+                doc.addEventListener('scroll', function () {
+                    if (self._viewMode !== 'page') return;
+                    var de = doc.documentElement;
+                    if (de.scrollLeft) de.scrollLeft = 0;
+                }, true);
+            }
         },
 
         _applyViewMode: function (frame, doc, style) {
@@ -1200,9 +1237,23 @@ if (typeof window.a11yBookReader === 'undefined') {
                     // clip moves WITH its own transform, so a clipped body
                     // slides its window off-screen on page turns (blank page).
                     // The static html element does the clipping instead.
-                    'body{height:100%;margin:0;padding:24px ' + marginPx + 'px;box-sizing:border-box;' +
-                    'column-width:' + (w - marginPx * 2) + 'px;column-gap:' + (marginPx * 2) + 'px;column-fill:auto;}' +
-                    'img,svg,video{max-width:100%;max-height:90vh;}' +
+                    // !important throughout: EPUB body classes (e.g. Calibre's
+                    // .calibre with its own margins) outrank a bare 'body'
+                    // selector — losing the gutters changes the real column
+                    // advance away from pageStep and every page splits in half
+                    'body{height:100% !important;margin:0 !important;padding:24px ' + marginPx + 'px !important;box-sizing:border-box !important;' +
+                    'column-width:' + (w - marginPx * 2) + 'px !important;column-gap:' + (marginPx * 2) + 'px !important;column-fill:auto !important;}' +
+                    // Fit images to the view while keeping aspect ratio: width/height
+                    // auto override publisher dimension attributes that would distort
+                    'img,video{max-width:100%;max-height:85vh;width:auto;height:auto;object-fit:contain;}' +
+                'svg{max-width:100%;max-height:85vh;}' + // size caps only: width/height auto would override an SVG cover's 100% attributes and collapse it to blank
+                    // Column integrity: publisher CSS (Calibre wrappers etc.) can set
+                    // widths wider than the column box; CSS columns don't clamp them,
+                    // so the content bleeds across the gap into the NEXT page view
+                    // (half page left, half of the next right). Clamp block widths and
+                    // wrap long words (wide letter/word spacing amplifies them).
+                    'body div,body p,body table,body pre,body blockquote{max-width:100% !important;box-sizing:border-box;}' +
+                    'body{overflow-wrap:break-word;}' +
                     (self._reducedMotion ? '' :
                         'body{transition:transform 0.18s ease-out;}');
                 self._pageStep = w;
@@ -1217,6 +1268,27 @@ if (typeof window.a11yBookReader === 'undefined') {
                 // Force layout, then measure total horizontal flow
                 var total = doc.body.scrollWidth;
                 self._pageCount = Math.max(1, Math.round(total / w));
+                // Forced breaks (Calibre page-break divs at chapter ends) leave a
+                // trailing EMPTY column that scrollWidth counts as a page — every
+                // chapter then ends on a blank view, and entering from the end or
+                // resuming near 100% lands straight on it. Trust the last CONTENT
+                // edge instead and drop trailing empties.
+                try {
+                    var lastRight = 0;
+                    var els = doc.body.querySelectorAll('p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,figure,dt,dd,img,svg,table,video');
+                    for (var ei = 0; ei < els.length; ei++) {
+                        var el2 = els[ei];
+                        if (!(el2.offsetWidth > 0)) continue;
+                        var tn = (el2.tagName || '').toUpperCase();
+                        var isMedia = tn === 'IMG' || tn === 'SVG' || tn === 'TABLE' || tn === 'VIDEO';
+                        if (!isMedia && !(el2.textContent || '').trim()) continue;
+                        var edge = el2.offsetLeft + el2.offsetWidth;
+                        if (edge > lastRight) lastRight = edge;
+                    }
+                    if (lastRight > 0) {
+                        self._pageCount = Math.max(1, Math.min(self._pageCount, Math.ceil(lastRight / w)));
+                    }
+                } catch (e) {}
                 var entry = self._enterAtEnd ? self._pageCount - 1
                     : Math.round(keepFraction * (self._pageCount - 1));
                 self._enterAtEnd = false;
@@ -1224,8 +1296,10 @@ if (typeof window.a11yBookReader === 'undefined') {
             } else {
                 style.textContent = reading +
                     'html{overflow-y:auto;}' +
-                    'body{margin:0;padding:24px ' + marginPx + 'px;column-width:auto;transform:none;}' +
-                    'img,svg,video{max-width:100%;}';
+                    'body{margin:0 !important;padding:24px ' + marginPx + 'px !important;box-sizing:border-box !important;column-width:auto !important;transform:none;overflow-wrap:break-word;}' +
+                    'img,video{max-width:100%;max-height:85vh;width:auto;height:auto;object-fit:contain;}' +
+                'svg{max-width:100%;max-height:85vh;}' + // size caps only: width/height auto would override an SVG cover's 100% attributes and collapse it to blank
+                    'body div,body p,body table,body pre,body blockquote{max-width:100% !important;box-sizing:border-box;}';
                 doc.body.style.transform = '';
                 self._page = 0;
                 self._pageCount = 1;
@@ -1424,6 +1498,7 @@ if (typeof window.a11yBookReader === 'undefined') {
 
             this._scrollSections[index] = sec;
             this._wireSectionInteractions(doc, sec, index);
+            this._fixSvgAspect(sec);
             // New section resident: paint any of its highlights/notes, and make
             // sure selection handlers exist on the stitched host document
             var fr = document.getElementById('abr-frame');
@@ -1487,14 +1562,26 @@ if (typeof window.a11yBookReader === 'undefined') {
             var style = doc.getElementById('abr-view-style');
             if (style) style.textContent = this._readingCss() +
                 'html{overflow-y:auto;}' +
-                'body{margin:0;padding:24px ' + marginPx + 'px;column-width:auto;transform:none;}' +
+                'body{margin:0 !important;padding:24px ' + marginPx + 'px !important;box-sizing:border-box !important;column-width:auto !important;transform:none;overflow-wrap:break-word;}' +
                 '.abr-ch + .abr-ch{margin-top:2.5em;padding-top:2.5em;border-top:2px solid currentColor;}' +
-                'img,svg,video{max-width:100%;}';
+                'img,video{max-width:100%;max-height:85vh;width:auto;height:auto;object-fit:contain;}' +
+                'svg{max-width:100%;max-height:85vh;}' + // size caps only: width/height auto would override an SVG cover's 100% attributes and collapse it to blank
+                'body div,body p,body table,body pre,body blockquote{max-width:100% !important;box-sizing:border-box;}';
             if (this._applyChromeTheme) this._applyChromeTheme();
         },
 
         _getBlocksIn: function (el) {
             return el.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, figure, dt, dd');
+        },
+
+        // Stretched cover art: preserveAspectRatio="none" was authored for a
+        // fixed page and distorts in any other box — "meet" letterboxes instead.
+        _fixSvgAspect: function (root) {
+            try {
+                root.querySelectorAll('svg[preserveAspectRatio="none"]').forEach(function (s) {
+                    s.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+                });
+            } catch (e) {}
         },
 
         // The active chapter is the first section still substantially in view at
