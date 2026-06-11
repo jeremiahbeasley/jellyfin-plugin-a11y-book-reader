@@ -674,6 +674,22 @@
     cursor: default;
 }
 
+/* Bookmarks tab: jump button + delete button per row */
+.abr-bm-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.abr-bm-row .abr-map-item {
+    flex: 1;
+    min-width: 0;
+}
+
+.abr-bm-del {
+    flex: none;
+}
+
 .abr-goto-input {
     min-height: 40px; /* WCAG 2.5.8 */
     padding: 6px 10px;

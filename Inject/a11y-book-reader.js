@@ -236,6 +236,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                 self._chapterIndex = 0;
                 history.pushState({ abrOpen: true }, '');
                 self._buildReaderDOM(bookName);
+                self._loadAnnotations(itemId); // non-blocking; rotor + button update when it lands
                 // Resume at the saved position when one exists; otherwise start at 0
                 self._fetchProgress(itemId).then(function (p) {
                     // Locator shape (defensive about JSON casing)
@@ -394,6 +395,18 @@ if (typeof window.a11yBookReader === 'undefined') {
             mapBtn.addEventListener('click', function () { self._toggleBookMap(); });
             toolbar.appendChild(mapBtn);
 
+            // Bookmark toggle for the current position (B works reader-wide)
+            var bookmarkBtn = document.createElement('button');
+            bookmarkBtn.id = 'abr-bookmark-btn';
+            bookmarkBtn.type = 'button';
+            bookmarkBtn.className = 'abr-icon-btn';
+            bookmarkBtn.setAttribute('aria-label', 'Bookmark this position');
+            bookmarkBtn.setAttribute('aria-pressed', 'false');
+            bookmarkBtn.setAttribute('aria-keyshortcuts', 'b');
+            bookmarkBtn.innerHTML = '<span class="material-icons" aria-hidden="true">bookmark_border</span>';
+            bookmarkBtn.addEventListener('click', function () { self._toggleBookmark(); });
+            toolbar.appendChild(bookmarkBtn);
+
             // Back: return to the position before the last jump/link
             var backBtn = document.createElement('button');
             backBtn.id = 'abr-back-btn';
@@ -525,7 +538,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             rotor.className = 'abr-rotor-select';
             rotor.setAttribute('aria-label', 'Navigate by');
             [['chapter', 'Chapter'], ['page', 'Page'], ['heading', 'Heading'],
-             ['paragraph', 'Paragraph'], ['sentence', 'Sentence']].forEach(function (o) {
+             ['paragraph', 'Paragraph'], ['sentence', 'Sentence'], ['bookmark', 'Bookmark']].forEach(function (o) {
                 var opt = document.createElement('option');
                 opt.value = o[0]; opt.textContent = o[1];
                 if (o[0] === self._navUnit) opt.selected = true;
@@ -763,6 +776,7 @@ if (typeof window.a11yBookReader === 'undefined') {
                 case 'heading':   this._navByElement(delta, 'heading'); break;
                 case 'paragraph': this._navByElement(delta, 'paragraph'); break;
                 case 'sentence':  this._navBySentence(delta); selfHandled = true; break; // self-manages audio
+                case 'bookmark':  this._navByBookmark(delta); break;
                 case 'chapter':
                 default:          this._navByChapter(delta); break;
             }
@@ -1535,7 +1549,20 @@ if (typeof window.a11yBookReader === 'undefined') {
                 var el = id ? sec.querySelector('#' + (window.CSS && CSS.escape ? CSS.escape(id) : id)) : sec;
                 if (!el) return false;
                 var win = doc.defaultView;
-                win.scrollTo(0, el.getBoundingClientRect().top + win.pageYOffset - 16);
+                var target = el.getBoundingClientRect().top + win.pageYOffset - 16;
+                win.scrollTo(0, target);
+                // A target past the end of the loaded content gets CLAMPED to
+                // max-scroll: the viewport then sits inside the PREVIOUS section
+                // and the position tracker snaps the chapter index back. Count a
+                // clamped scroll as not-arrived (and queue the next section so
+                // the document grows) — the retry loop below re-scrolls once the
+                // target is reachable. On the book's final section the target may
+                // stay unreachable; retries exhaust and the clamped position (the
+                // best possible) stands.
+                if (win.scrollY < target - 2) {
+                    if (self._spine && chapterIndex + 1 < self._spine.length) self._scrollQueueLoad(doc, chapterIndex + 1);
+                    return false;
+                }
                 return true;
             };
             if (go()) return;
@@ -1746,6 +1773,8 @@ if (typeof window.a11yBookReader === 'undefined') {
             }
 
             if (e.key === 'p' || e.key === 'P') { e.preventDefault(); this._toggleTts(); return; }
+            // b = toggle a bookmark at the current position
+            if (e.key === 'b' || e.key === 'B') { e.preventDefault(); this._toggleBookmark(); return; }
 
             // Reading keys while the book frame has focus: act on the content
             var frame = document.getElementById('abr-frame');
@@ -2967,7 +2996,7 @@ if (typeof window.a11yBookReader === 'undefined') {
 
         _normalizeNavUnit: function (v) {
             return (v === 'chapter' || v === 'page' || v === 'heading' ||
-                    v === 'paragraph' || v === 'sentence') ? v : 'chapter';
+                    v === 'paragraph' || v === 'sentence' || v === 'bookmark') ? v : 'chapter';
         },
 
         _mergeSettings: function (s) {
@@ -3215,7 +3244,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             tabs.className = 'abr-tablist';
             tabs.setAttribute('role', 'tablist');
             tabs.setAttribute('aria-label', 'Navigation sections');
-            var defs = [['toc', 'Contents'], ['search', 'Search'], ['pages', 'Pages'], ['landmarks', 'Landmarks'], ['goto', 'Go to']];
+            var defs = [['toc', 'Contents'], ['bookmarks', 'Bookmarks'], ['search', 'Search'], ['pages', 'Pages'], ['landmarks', 'Landmarks'], ['goto', 'Go to']];
             defs.forEach(function (t) {
                 var b = document.createElement('button');
                 b.type = 'button';
@@ -3322,6 +3351,43 @@ if (typeof window.a11yBookReader === 'undefined') {
             } else if (tab === 'landmarks') {
                 if (!self._nav.landmarks.length) body.textContent = 'This book has no landmarks.';
                 else renderTree(self._nav.landmarks, 0);
+            } else if (tab === 'bookmarks') {
+                var bms = self._bookmarks();
+                if (!bms.length) {
+                    body.textContent = 'No bookmarks yet. Press B while reading to add one.';
+                } else {
+                    bms.forEach(function (b) {
+                        var row = document.createElement('div');
+                        row.className = 'abr-bm-row';
+                        var label = 'Chapter ' + (b.chapter + 1) + ' · ' + Math.round(b.fraction * 100) + '%' +
+                            (b.quote ? ' — ' + b.quote : '');
+                        var go = document.createElement('button');
+                        go.type = 'button';
+                        go.className = 'abr-map-item';
+                        go.textContent = label;
+                        go.addEventListener('click', function () {
+                            // Bookmarks restore an exact locator (fraction + para),
+                            // which jumpBtn's chapter+anchor path can't carry
+                            self._navStack.push(self._snapshotLocator());
+                            self._updateBackBtn();
+                            self._goToLocator(b);
+                            self._toggleBookMap();
+                            setTimeout(function () {
+                                var info = document.getElementById('abr-chapter-info');
+                                if (info) info.textContent = 'Jumped to bookmark';
+                            }, 150);
+                        });
+                        var del = document.createElement('button');
+                        del.type = 'button';
+                        del.className = 'abr-icon-btn abr-bm-del';
+                        del.setAttribute('aria-label', 'Delete bookmark: ' + label);
+                        del.innerHTML = '<span class="material-icons" aria-hidden="true">delete</span>';
+                        del.addEventListener('click', function () { self._deleteAnnotation(b, row); });
+                        row.appendChild(go);
+                        row.appendChild(del);
+                        body.appendChild(row);
+                    });
+                }
             } else if (tab === 'search') {
                 self._renderSearchTab(body);
             } else {
@@ -4257,6 +4323,9 @@ if (typeof window.a11yBookReader === 'undefined') {
             // matters is the SPOKEN paragraph, not the visual viewport top.
             var spoken = this._currentTtsBlock();
             if (spoken !== null && typeof para === 'number') para = spoken;
+            // Position already computed here — keep the bookmark toggle's
+            // pressed state in sync at no extra layout cost
+            this._updateBookmarkBtn(chapter, fraction, para);
             var spineLen = Math.max(1, this._spine.length);
             var item = this._spine[chapter] || {};
             var text = null;
@@ -4294,6 +4363,207 @@ if (typeof window.a11yBookReader === 'undefined') {
                     })
                 }).catch(function () {});
             } catch (e) {}
+        },
+
+        // ── Annotations & bookmarks (Phase 6) ────────────────────────────────
+        // Stored server-side per user per book as W3C-Web-Annotation-shaped
+        // records whose target is the same Readium locator used for progress.
+
+        _loadAnnotations: function (itemId) {
+            var self = this;
+            self._annotations = [];
+            ApiClient.ajax({
+                url: ApiClient.getUrl('A11yBookReader/annotations/' + itemId),
+                type: 'GET',
+                dataType: 'json'
+            }).then(function (list) {
+                self._annotations = (list || []).map(self._normalizeAnnotation);
+                self._updateBookmarkBtn();
+            }).catch(function () {});
+        },
+
+        // Defensive about JSON casing, same as the locator load
+        _normalizeAnnotation: function (a) {
+            var t = a.Target || a.target || {};
+            var loc = t.Locations || t.locations || {};
+            var txt = t.Text || t.text || null;
+            return {
+                id: a.Id || a.id,
+                type: a.Type || a.type || 'bookmark',
+                body: a.Body != null ? a.Body : (a.body != null ? a.body : null),
+                color: a.Color || a.color || null,
+                href: t.Href || t.href || null,
+                chapter: typeof loc.Chapter === 'number' ? loc.Chapter : (loc.chapter || 0),
+                fraction: typeof loc.Progression === 'number' ? loc.Progression : (loc.progression || 0),
+                para: (loc.Position != null) ? loc.Position : (loc.position != null ? loc.position : null),
+                quote: txt ? (txt.Highlight || txt.highlight || null) : null
+            };
+        },
+
+        _bookmarks: function () {
+            return (this._annotations || [])
+                .filter(function (a) { return a.type === 'bookmark'; })
+                .sort(function (x, y) { return (x.chapter - y.chapter) || (x.fraction - y.fraction); });
+        },
+
+        // A bookmark "at" the current position: same chapter and same paragraph
+        // when both sides know it, else within 2% of the chapter. Optional args
+        // let already-computed values be reused (avoids extra layout passes).
+        _findBookmarkAt: function (ch, fr, pa) {
+            if (ch === undefined) ch = this._chapterIndex;
+            if (fr === undefined) fr = this._currentScrollFraction();
+            if (pa === undefined) pa = this._firstVisiblePara();
+            var list = this._bookmarks();
+            for (var i = 0; i < list.length; i++) {
+                var b = list[i];
+                if (b.chapter !== ch) continue;
+                if (b.para != null && pa != null) { if (b.para === pa) return b; }
+                else if (Math.abs(b.fraction - fr) <= 0.02) return b;
+            }
+            return null;
+        },
+
+        _updateBookmarkBtn: function (ch, fr, pa) {
+            var btn = document.getElementById('abr-bookmark-btn');
+            if (!btn) return;
+            var on = !!this._findBookmarkAt(ch, fr, pa);
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            var icon = btn.querySelector('.material-icons');
+            if (icon) icon.textContent = on ? 'bookmark' : 'bookmark_border';
+        },
+
+        _toggleBookmark: function () {
+            var self = this;
+            if (!self._currentItemId || !self._spine) return;
+            var info = document.getElementById('abr-chapter-info');
+            var existing = self._findBookmarkAt();
+            if (existing) { self._deleteAnnotation(existing, null); return; }
+
+            var ch = self._chapterIndex;
+            var fr = self._currentScrollFraction();
+            var pa = self._firstVisiblePara();
+            // Quote context makes the bookmark robust to re-rendering and
+            // readable in the Bookmarks list
+            var text = null;
+            try {
+                var doc = document.getElementById('abr-frame').contentDocument;
+                var blocks = self._getBlocks(doc);
+                var el = (typeof pa === 'number' && pa >= 0) ? blocks[pa] : null;
+                var snippet = el ? (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+                if (snippet) text = { Highlight: snippet };
+            } catch (e) {}
+            var item = self._spine[ch] || {};
+            ApiClient.ajax({
+                url: ApiClient.getUrl('A11yBookReader/annotations/' + self._currentItemId),
+                type: 'POST',
+                contentType: 'application/json',
+                dataType: 'json',
+                data: JSON.stringify({
+                    Type: 'bookmark',
+                    Href: item.Href || item.href || null,
+                    Locations: {
+                        Chapter: ch,
+                        Progression: fr,
+                        TotalProgression: (ch + fr) / Math.max(1, self._spine.length),
+                        Position: (typeof pa === 'number' && pa >= 0) ? pa : null
+                    },
+                    Text: text
+                })
+            }).then(function (created) {
+                self._annotations.push(self._normalizeAnnotation(created));
+                self._updateBookmarkBtn();
+                self._renderBookmarksIfOpen();
+                if (info) info.textContent = 'Bookmark added';
+            }).catch(function () {
+                if (info) info.textContent = 'Could not add bookmark';
+            });
+        },
+
+        _deleteAnnotation: function (a, row) {
+            var self = this;
+            ApiClient.ajax({
+                url: ApiClient.getUrl('A11yBookReader/annotations/' + self._currentItemId + '/' + a.id),
+                type: 'DELETE'
+            }).then(function () {
+                self._annotations = (self._annotations || []).filter(function (x) { return x.id !== a.id; });
+                self._updateBookmarkBtn();
+                if (row && row.parentNode) {
+                    var body = document.getElementById('abr-map-body');
+                    row.parentNode.removeChild(row);
+                    // The focused delete button just vanished — land focus on the
+                    // tabpanel so keyboard/SR users aren't dropped to <body>
+                    if (body) {
+                        body.focus();
+                        if (!self._bookmarks().length) body.textContent = 'No bookmarks yet. Press B while reading to add one.';
+                    }
+                }
+                var info = document.getElementById('abr-chapter-info');
+                if (info) info.textContent = 'Bookmark removed';
+            }).catch(function () {
+                var info = document.getElementById('abr-chapter-info');
+                if (info) info.textContent = 'Could not remove bookmark';
+            });
+        },
+
+        // Rotor unit "Bookmark": jump to the nearest bookmark in delta's
+        // direction, ordered by (chapter, progression within chapter).
+        _navByBookmark: function (delta) {
+            var info = document.getElementById('abr-chapter-info');
+            var list = this._bookmarks();
+            if (!list.length) { if (info) info.textContent = 'No bookmarks in this book'; return; }
+            var ch = this._chapterIndex, fr = this._currentScrollFraction();
+            var target = null, idx = -1;
+            if (delta > 0) {
+                for (var i = 0; i < list.length; i++) {
+                    if (list[i].chapter > ch || (list[i].chapter === ch && list[i].fraction > fr + 0.005)) { target = list[i]; idx = i; break; }
+                }
+            } else {
+                for (var j = list.length - 1; j >= 0; j--) {
+                    if (list[j].chapter < ch || (list[j].chapter === ch && list[j].fraction < fr - 0.005)) { target = list[j]; idx = j; break; }
+                }
+            }
+            if (!target) {
+                if (info) info.textContent = delta > 0 ? 'No bookmarks after this position' : 'No bookmarks before this position';
+                return;
+            }
+            this._goToLocator(target);
+            var announce = 'Bookmark ' + (idx + 1) + ' of ' + list.length;
+            setTimeout(function () {
+                var inf = document.getElementById('abr-chapter-info');
+                if (inf) inf.textContent = announce;
+            }, 150);
+        },
+
+        // Jump to a stored locator — same restore mechanics as _goBack
+        _goToLocator: function (loc) {
+            this._navResetTts();
+            if (this._viewMode === 'scroll') {
+                this._chapterIndex = loc.chapter;
+                this._scrollGoToAnchor(loc.chapter, null);
+                if (loc.para != null) {
+                    var selfRef = this;
+                    setTimeout(function () { selfRef._scrollGoToPara(loc.chapter, loc.para); }, 120);
+                }
+                return;
+            }
+            if (loc.chapter === this._chapterIndex) {
+                if (!this._goToPara(loc.para)) {
+                    if (this._viewMode === 'page') {
+                        this._goToPage(Math.round(loc.fraction * (this._pageCount - 1)), true);
+                    }
+                }
+                return;
+            }
+            this._pendingScrollFraction = loc.fraction;
+            this._pendingPara = loc.para;
+            this._loadChapter(loc.chapter);
+        },
+
+        _renderBookmarksIfOpen: function () {
+            var panel = document.getElementById('abr-bookmap');
+            if (panel && !panel.hasAttribute('hidden') && this._bookMapTab === 'bookmarks') {
+                this._renderBookMapTab('bookmarks');
+            }
         },
 
         // Resolve a text quote to a block index (TextQuoteSelector-style):

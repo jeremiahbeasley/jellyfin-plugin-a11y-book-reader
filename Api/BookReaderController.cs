@@ -17,16 +17,18 @@ public class BookReaderController : ControllerBase
     private readonly PiperService _piper;
     private readonly ProgressService _progress;
     private readonly SettingsService _settings;
+    private readonly AnnotationService _annotations;
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
     private readonly ILogger<BookReaderController> _logger;
 
-    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, ILibraryManager libraryManager, IUserManager userManager, ILogger<BookReaderController> logger)
+    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, AnnotationService annotations, ILibraryManager libraryManager, IUserManager userManager, ILogger<BookReaderController> logger)
     {
         _epub = epub;
         _piper = piper;
         _progress = progress;
         _settings = settings;
+        _annotations = annotations;
         _libraryManager = libraryManager;
         _userManager = userManager;
         _logger = logger;
@@ -183,6 +185,52 @@ public class BookReaderController : ControllerBase
 
         _progress.Save(userId.Value, itemId, locator);
         return NoContent();
+    }
+
+    // ── Annotations & bookmarks (per user, per book) ──────────────────────────
+
+    [HttpGet("annotations/{itemId}")]
+    public ActionResult<List<Annotation>> GetAnnotations(Guid itemId)
+    {
+        var userId = GetUserId();
+        if (userId == null) return Unauthorized();
+        return _annotations.List(userId.Value, itemId);
+    }
+
+    [HttpPost("annotations/{itemId}")]
+    public ActionResult<Annotation> CreateAnnotation(Guid itemId, [FromBody] SaveAnnotationRequest request)
+    {
+        var userId = GetUserId();
+        if (userId == null) return Unauthorized();
+        if (request.Locations == null) return BadRequest(new { error = "Locations is required" });
+
+        var created = _annotations.Add(userId.Value, itemId, new Annotation
+        {
+            Type = request.Type,
+            Body = request.Body,
+            Color = request.Color,
+            Target = new Locator { Href = request.Href, Locations = request.Locations, Text = request.Text },
+        });
+        if (created == null) return BadRequest(new { error = "Annotation limit reached for this book" });
+        return created;
+    }
+
+    [HttpPost("annotations/{itemId}/{id}")]
+    public ActionResult<Annotation> UpdateAnnotation(Guid itemId, Guid id, [FromBody] UpdateAnnotationRequest request)
+    {
+        var userId = GetUserId();
+        if (userId == null) return Unauthorized();
+        var updated = _annotations.Update(userId.Value, itemId, id, request.Body, request.Color);
+        if (updated == null) return NotFound();
+        return updated;
+    }
+
+    [HttpDelete("annotations/{itemId}/{id}")]
+    public ActionResult DeleteAnnotation(Guid itemId, Guid id)
+    {
+        var userId = GetUserId();
+        if (userId == null) return Unauthorized();
+        return _annotations.Delete(userId.Value, itemId, id) ? NoContent() : NotFound();
     }
 
     // ── Reader settings (cross-device, per user) ──────────────────────────────

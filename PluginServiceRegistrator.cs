@@ -13,5 +13,6 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<PiperService>();
         serviceCollection.AddSingleton<ProgressService>();
         serviceCollection.AddSingleton<SettingsService>();
+        serviceCollection.AddSingleton<AnnotationService>();
     }
 }
