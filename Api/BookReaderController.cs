@@ -18,17 +18,21 @@ public class BookReaderController : ControllerBase
     private readonly ProgressService _progress;
     private readonly SettingsService _settings;
     private readonly AnnotationService _annotations;
+    private readonly TextFormatService _textFormats;
+    private readonly DaisyFormatService _daisy;
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
     private readonly ILogger<BookReaderController> _logger;
 
-    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, AnnotationService annotations, ILibraryManager libraryManager, IUserManager userManager, ILogger<BookReaderController> logger)
+    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, AnnotationService annotations, TextFormatService textFormats, DaisyFormatService daisy, ILibraryManager libraryManager, IUserManager userManager, ILogger<BookReaderController> logger)
     {
         _epub = epub;
         _piper = piper;
         _progress = progress;
         _settings = settings;
         _annotations = annotations;
+        _textFormats = textFormats;
+        _daisy = daisy;
         _libraryManager = libraryManager;
         _userManager = userManager;
         _logger = logger;
@@ -95,7 +99,11 @@ public class BookReaderController : ControllerBase
     public ActionResult<List<object>> GetSpine(Guid itemId)
     {
         if (!CanAccessItem(itemId)) return NotFound();
-        var epub = _epub.GetParsed(itemId);
+        // Format routing: text formats (.txt/.md/.html) and DAISY zips share
+        // the EPUB surface
+        var epub = _textFormats.Handles(itemId) ? _textFormats.GetParsed(itemId)
+            : _daisy.Handles(itemId) ? _daisy.GetParsed(itemId)
+            : _epub.GetParsed(itemId);
         if (epub == null) return NotFound();
         return epub.Spine.Select(s => (object)new { s.Index, s.Title, Href = s.ZipPath }).ToList();
     }
@@ -109,7 +117,9 @@ public class BookReaderController : ControllerBase
     public ActionResult GetChapter(Guid itemId, int index)
     {
         if (!CanAccessItem(itemId)) return NotFound();
-        var html = _epub.GetChapterHtml(itemId, index, GetApiToken());
+        var html = _textFormats.Handles(itemId) ? _textFormats.GetChapterHtml(itemId, index, GetApiToken())
+            : _daisy.Handles(itemId) ? _daisy.GetChapterHtml(itemId, index, GetApiToken())
+            : _epub.GetChapterHtml(itemId, index, GetApiToken());
         if (html == null) return NotFound();
         return Content(html, "text/html");
     }
@@ -119,7 +129,9 @@ public class BookReaderController : ControllerBase
     {
         if (!CanAccessItem(itemId)) return NotFound();
         if (string.IsNullOrWhiteSpace(path)) return BadRequest();
-        var (data, contentType) = _epub.GetResource(itemId, path);
+        var (data, contentType) = _textFormats.Handles(itemId) ? _textFormats.GetResource(itemId, path)
+            : _daisy.Handles(itemId) ? _daisy.GetResource(itemId, path)
+            : _epub.GetResource(itemId, path);
         if (data == null) return NotFound();
         return File(data, contentType);
     }
@@ -132,7 +144,9 @@ public class BookReaderController : ControllerBase
     public ActionResult<BookNavigation> GetNavigation(Guid itemId)
     {
         if (!CanAccessItem(itemId)) return NotFound();
-        var nav = _epub.GetNavigation(itemId);
+        var nav = _textFormats.Handles(itemId) ? _textFormats.GetNavigation(itemId)
+            : _daisy.Handles(itemId) ? _daisy.GetNavigation(itemId)
+            : _epub.GetNavigation(itemId);
         if (nav == null) return NotFound();
         return nav;
     }
@@ -146,7 +160,9 @@ public class BookReaderController : ControllerBase
         if (!CanAccessItem(itemId)) return NotFound();  // results leak book text
         if (string.IsNullOrWhiteSpace(q) || q.Trim().Length < 2)
             return new SearchResults();
-        return _epub.Search(itemId, q);
+        return _textFormats.Handles(itemId) ? _textFormats.Search(itemId, q)
+            : _daisy.Handles(itemId) ? _daisy.Search(itemId, q)
+            : _epub.Search(itemId, q);
     }
 
     // ── Reading progress ──────────────────────────────────────────────────────

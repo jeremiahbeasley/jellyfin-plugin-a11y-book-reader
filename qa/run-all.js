@@ -10,6 +10,7 @@ const SUITES = [
   ['Multi-book', './tests/multibook'],
   ['Scroll-follow', './tests/scroll-follow'],
   ['Annotations', './tests/annotations'],
+  ['Formats', './tests/formats'],
 ];
 
 (async () => {

@@ -2157,8 +2157,10 @@ if (typeof window.a11yBookReader === 'undefined') {
             var frame = document.getElementById('abr-frame');
             if (!frame || !frame.contentDocument) return;
 
-            // Build text + offset map once per chapter; reuse on mid-read restarts
-            if (!self._ttsFullText) {
+            // Build text + offset map once per chapter; reuse on mid-read
+            // restarts — but never reuse a STALE map (trimmed + re-stitched
+            // scroll sections leave it pointing at detached nodes)
+            if (!self._ttsFullText || self._offsetMapStale()) {
                 try {
                     var built = self._buildOffsetMap(frame.contentDocument);
                     self._ttsOffsetMap = built.map;
@@ -2336,6 +2338,16 @@ if (typeof window.a11yBookReader === 'undefined') {
             return {text: text, map: map};
         },
 
+        // A cached offset map is stale when its nodes were removed from the
+        // document (scroll-mode section trim + re-stitch). Probe the middle
+        // entry — all entries share the section subtree's fate.
+        _offsetMapStale: function () {
+            var map = this._ttsOffsetMap;
+            if (!map || !map.length) return false;
+            var mid = map[map.length >> 1];
+            return !mid || !mid.node || !mid.node.isConnected;
+        },
+
         _findMapEntry: function (offset) {
             var map = this._ttsOffsetMap;
             var lo = 0, hi = map.length - 1;
@@ -2359,6 +2371,16 @@ if (typeof window.a11yBookReader === 'undefined') {
 
                 var entry = this._findMapEntry(offset);
                 if (!entry) return;
+                // Section re-stitched MID-READ: the node is detached, so the
+                // range would paint nowhere. Identical content re-stitches to
+                // identical offsets — rebuild the map and carry on.
+                if (entry.node && !entry.node.isConnected) {
+                    var rebuilt = this._buildOffsetMap(iframeDoc);
+                    if (rebuilt.text !== this._ttsFullText) return; // different section is active — let the restart path handle it
+                    this._ttsOffsetMap = rebuilt.map;
+                    entry = this._findMapEntry(offset);
+                    if (!entry || !entry.node || !entry.node.isConnected) return;
+                }
                 var nodeOff = offset - entry.absStart;
                 var nodeEnd = Math.min(nodeOff + (length || 1), entry.node.textContent.length);
                 if (nodeEnd <= nodeOff) return;
@@ -2702,7 +2724,11 @@ if (typeof window.a11yBookReader === 'undefined') {
             var frame = document.getElementById('abr-frame');
             if (!frame) return;
 
-            if (!self._ttsFullText) {
+            // Rebuild when empty OR STALE: scroll mode trims and re-stitches
+            // sections, leaving a cached map that points at DETACHED nodes —
+            // the Highlight API accepts ranges on them but paints nothing
+            // (highlights silently vanish and stop/start can't recover).
+            if (!self._ttsFullText || self._offsetMapStale()) {
                 try {
                     var built = self._buildOffsetMap(frame.contentDocument);
                     self._ttsOffsetMap = built.map;

@@ -14,5 +14,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<ProgressService>();
         serviceCollection.AddSingleton<SettingsService>();
         serviceCollection.AddSingleton<AnnotationService>();
+        serviceCollection.AddSingleton<TextFormatService>();
+        serviceCollection.AddSingleton<DaisyFormatService>();
     }
 }
