@@ -18,7 +18,7 @@ public class SettingsService
     private readonly ILogger<SettingsService> _logger;
     private readonly object _lock = new();
 
-    private static readonly HashSet<string> AllowedViewModes = new() { "page", "chapter", "scroll" };
+    private static readonly HashSet<string> AllowedViewModes = new() { "page", "chapter", "scroll", "pdfview" };
     private static readonly HashSet<string> AllowedNavUnits = new() { "chapter", "page", "heading", "paragraph", "sentence", "bookmark" };
     private static readonly HashSet<string> AllowedThemes = new() { "light", "dark", "sepia", "contrast", "custom" };
     private static readonly HashSet<string> AllowedFonts = new() { "publisher", "serif", "sans", "opendyslexic" };

@@ -7,13 +7,18 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.0.61</Version>
+    <!-- Plugin folder must contain dependency DLLs (PdfPig); server-provided
+         assemblies are excluded at deploy time, not here -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <Version>1.0.0.63</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Jellyfin.Controller" Version="10.11.10" />
     <PackageReference Include="Jellyfin.Model" Version="10.11.10" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />
+    <PackageReference Include="UglyToad.PdfPig.DocumentLayoutAnalysis" Version="1.7.0-custom-5" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,6 +28,8 @@
     <EmbeddedResource Include="Fonts\OpenDyslexic-Regular.woff2" />
     <EmbeddedResource Include="Fonts\OpenDyslexic-Bold.woff2" />
     <EmbeddedResource Include="Fonts\OpenDyslexic-Italic.woff2" />
+    <EmbeddedResource Include="PdfJs\pdf.min.mjs" />
+    <EmbeddedResource Include="PdfJs\pdf.worker.min.mjs" />
   </ItemGroup>
 
 </Project>

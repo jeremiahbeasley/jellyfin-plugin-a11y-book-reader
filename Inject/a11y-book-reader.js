@@ -40,7 +40,8 @@ if (typeof window.a11yBookReader === 'undefined') {
         _modeMeta: {
             page:    { icon: 'auto_stories', label: 'Page',    next: 'chapter' },
             chapter: { icon: 'view_day',     label: 'Chapter', next: 'scroll' },
-            scroll:  { icon: 'view_stream',  label: 'Scroll',  next: 'page' }
+            scroll:  { icon: 'view_stream',  label: 'Scroll',  next: 'page' },
+            pdfview: { icon: 'picture_as_pdf', label: 'Original layout', next: 'page' }
         },
         _page: 0,
         _pageCount: 1,
@@ -205,6 +206,19 @@ if (typeof window.a11yBookReader === 'undefined') {
             var self = this;
             self._lastFocused = document.activeElement;
             self._currentItemId = itemId;
+            // The nav cache is per-BOOK: without this reset a session shows a
+            // stale TOC after re-extraction — or the previous book's TOC
+            self._nav = null;
+            self._bookFormat = null;
+            self._pdfDoc = null;
+            // Format hint gates the Original-layout option (PDF only)
+            self._infoPromise = ApiClient.ajax({
+                url: ApiClient.getUrl('A11yBookReader/info/' + itemId),
+                type: 'GET', dataType: 'json'
+            }).then(function (i) {
+                self._bookFormat = (i.Format || i.format || 'other');
+                return self._bookFormat;
+            }).catch(function () { self._bookFormat = 'other'; return 'other'; });
 
             var readBtn = document.getElementById('abr-read-btn');
             if (readBtn) {
@@ -237,8 +251,39 @@ if (typeof window.a11yBookReader === 'undefined') {
                 history.pushState({ abrOpen: true }, '');
                 self._buildReaderDOM(bookName);
                 self._loadAnnotations(itemId); // non-blocking; rotor + button update when it lands
-                // Resume at the saved position when one exists; otherwise start at 0
-                self._fetchProgress(itemId).then(function (p) {
+                // Resume at the saved position when one exists; otherwise start at 0.
+                // Format must be known first: a saved pdfview mode is only valid
+                // for PDFs and the renderer branches on it.
+                Promise.all([self._fetchProgress(itemId), self._infoPromise]).then(function (rr) {
+                    var p = rr[0];
+                    self._viewMode = self._normalizeViewMode(self._viewMode);
+                    if (self._viewMode === 'pdfview') {
+                        var loc0 = p && (p.Locations || p.locations);
+                        var fr0 = loc0 && (typeof loc0.Progression === 'number' ? loc0.Progression : loc0.progression);
+                        self._enterPdfView(null, typeof fr0 === 'number' ? fr0 : 0);
+                        return;
+                    }
+                    return self._resumeFlow(p, spine);
+                }).catch(function () {
+                    if (self._viewMode === 'scroll') self._enterScrollMode(0, null, 0);
+                    else self._loadChapter(0);
+                });
+            }).catch(function () {
+                if (readBtn) {
+                    readBtn.disabled = false;
+                    readBtn.removeAttribute('aria-busy');
+                    readBtn.setAttribute('aria-label', 'Read ' + bookName);
+                    readBtn.innerHTML = '<span class="material-icons abr-btn-icon" aria-hidden="true">menu_book</span> Read';
+                }
+                self._showError('Could not open this book.');
+            });
+        },
+
+        // Resume into the reflow modes (extracted from the open flow so the
+        // pdfview branch can bypass it)
+        _resumeFlow: function (p, spine) {
+            var self = this;
+            return Promise.resolve().then(function () {
                     // Locator shape (defensive about JSON casing)
                     var loc = p && (p.Locations || p.locations);
                     var txt = p && (p.Text || p.text);
@@ -265,18 +310,198 @@ if (typeof window.a11yBookReader === 'undefined') {
                     } else {
                         self._loadChapter(0);
                     }
-                }).catch(function () {
-                    if (self._viewMode === 'scroll') self._enterScrollMode(0, null, 0);
-                    else self._loadChapter(0);
+            });
+        },
+
+        // ── PDF original-layout view (PDF.js canvas + text layer) ────────────
+        // The text layer is real DOM text positioned over the page image, so
+        // the existing offset-map / TTS / CSS-Highlight machinery reads and
+        // highlights the ORIGINAL page. Each PDF page acts as one TTS section.
+
+        _enterPdfView: function (startPage, resumeFraction) {
+            var self = this;
+            var frame = document.getElementById('abr-frame');
+            if (!frame || self._bookFormat !== 'pdf') return;
+            self._navResetTts();
+            if (self._scrollHandler) {
+                try { frame.contentWindow.removeEventListener('scroll', self._scrollHandler); } catch (e) {}
+                self._scrollHandler = null;
+            }
+            self._scrollSections = null;
+            self._scrollHeads = null;
+
+            // Chromium never PAINTS a canvas inside a sandboxed iframe that
+            // lacks allow-scripts — the buffer renders (getImageData works)
+            // but the screen stays blank. The pdfview document is entirely
+            // plugin-authored (PDF text enters only as textContent via the
+            // PDF.js TextLayer), so allow-scripts is safe here; the strict
+            // sandbox is restored on every path back to publisher HTML.
+            // srcdoc (a REAL navigation) so the relaxed sandbox takes effect.
+            // No abr-view-style here, and the text layer carries !important on
+            // everything the reading CSS forces (color/spacing/fonts) — the
+            // page is FIXED layout, user typography belongs to reflow mode.
+            frame.setAttribute('sandbox', 'allow-same-origin allow-scripts');
+            // Page turns are discrete events here — announce them. (Reflow
+            // modes keep this off: the % readout churns with every scroll.)
+            var pgInfo = document.getElementById('abr-page-info');
+            if (pgInfo) pgInfo.setAttribute('aria-live', 'polite');
+            frame.onload = function () {
+                frame.onload = null;
+                self._wireFrameKeys(frame.contentDocument);
+                var token = (typeof ApiClient !== 'undefined' && ApiClient.accessToken) ? ApiClient.accessToken() : '';
+                var fileUrl = ApiClient.getUrl('A11yBookReader/file/' + self._currentItemId, token ? { api_key: token } : {});
+                var load = self._pdfLib
+                    ? Promise.resolve(self._pdfLib)
+                    : import('/A11yBookReader/pdfjs/pdf.min.mjs').then(function (lib) {
+                        lib.GlobalWorkerOptions.workerSrc = '/A11yBookReader/pdfjs/pdf.worker.min.mjs';
+                        self._pdfLib = lib;
+                        return lib;
+                    });
+                load.then(function (lib) {
+                    return lib.getDocument({ url: fileUrl }).promise;
+                }).then(function (pdf) {
+                    self._pdfDoc = pdf;
+                    self._pdfNumPages = pdf.numPages;
+                    var page = startPage || (typeof resumeFraction === 'number' && resumeFraction > 0
+                        ? Math.round(resumeFraction * (pdf.numPages - 1)) + 1
+                        : 1);
+                    return self._pdfRenderPage(page);
+                }).catch(function (e) {
+                    var info = document.getElementById('abr-chapter-info');
+                    if (info) info.textContent = 'Could not open the original layout: ' + (e && e.message ? e.message : e);
                 });
-            }).catch(function () {
-                if (readBtn) {
-                    readBtn.disabled = false;
-                    readBtn.removeAttribute('aria-busy');
-                    readBtn.setAttribute('aria-label', 'Read ' + bookName);
-                    readBtn.innerHTML = '<span class="material-icons abr-btn-icon" aria-hidden="true">menu_book</span> Read';
+            };
+            frame.removeAttribute('src');
+            frame.srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+                '<style>' +
+                'html,body{margin:0;padding:0;background:#555 !important;}' +
+                '#abr-pdf-wrap{position:relative;margin:8px auto;box-shadow:0 2px 12px rgba(0,0,0,.5);}' +
+                '#abr-pdf-canvas{display:block;}' +
+                '.textLayer{position:absolute;inset:0;overflow:hidden;line-height:1 !important;}' +
+                '.textLayer span{color:transparent !important;position:absolute;white-space:pre;transform-origin:0 0;' +
+                'letter-spacing:0 !important;word-spacing:0 !important;line-height:1 !important;text-align:left !important;}' +
+                '</style></head><body><div id="abr-pdf-wrap">' +
+                '<canvas id="abr-pdf-canvas"></canvas>' +
+                '<div id="abr-pdf-text" class="textLayer"></div>' +
+                '</div></body></html>';
+        },
+
+        _exitPdfView: function () {
+            if (this._pdfDoc) { try { this._pdfDoc.destroy(); } catch (e) {} }
+            this._pdfDoc = null;
+            // srcdoc takes precedence over src — leaving it set would make
+            // every later chapter load show the stale PDF shell instead.
+            // Re-tighten the sandbox before publisher HTML loads again.
+            var frame = document.getElementById('abr-frame');
+            if (frame) {
+                frame.removeAttribute('srcdoc');
+                frame.setAttribute('sandbox', 'allow-same-origin');
+            }
+        },
+
+        _pdfRenderPage: function (n) {
+            var self = this;
+            if (!self._pdfDoc) return Promise.resolve();
+            // Serialize page renders: concurrent PDF.js render tasks on one
+            // canvas cancel each other and leave it blank
+            self._pdfRenderChain = (self._pdfRenderChain || Promise.resolve())
+                .then(function () { return self._pdfRenderPageNow(n); })
+                .catch(function () {});
+            return self._pdfRenderChain;
+        },
+
+        _pdfRenderPageNow: function (n) {
+            var self = this;
+            if (!self._pdfDoc) return Promise.resolve();
+            n = Math.max(1, Math.min(n, self._pdfNumPages));
+            self._pdfPage = n;
+            return self._pdfDoc.getPage(n).then(function (page) {
+                var frame = document.getElementById('abr-frame');
+                var doc = frame.contentDocument;
+                var availW = Math.max(200, frame.clientWidth - 16);
+                var vp1 = page.getViewport({ scale: 1 });
+                var scale = availW / vp1.width;
+                var dpr = window.devicePixelRatio || 1;
+                var vp = page.getViewport({ scale: scale });
+                var canvas = doc.getElementById('abr-pdf-canvas');
+                var wrap = doc.getElementById('abr-pdf-wrap');
+                if (!canvas || !wrap) return;
+                canvas.width = Math.floor(vp.width * dpr);
+                canvas.height = Math.floor(vp.height * dpr);
+                canvas.style.width = vp.width + 'px';
+                canvas.style.height = vp.height + 'px';
+                wrap.style.width = vp.width + 'px';
+                wrap.style.height = vp.height + 'px';
+                var renderTask = page.render({
+                    canvasContext: canvas.getContext('2d'),
+                    viewport: vp,
+                    transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+                });
+                var textDiv = doc.getElementById('abr-pdf-text');
+                textDiv.innerHTML = '';
+                textDiv.style.setProperty('--scale-factor', String(vp.scale));
+                var tl = new self._pdfLib.TextLayer({
+                    textContentSource: page.streamTextContent(),
+                    container: textDiv,
+                    viewport: vp,
+                });
+                return Promise.all([renderTask.promise, tl.render()]).then(function () {
+                    // This page is the TTS section now — drop the old caches
+                    self._ttsFullText = '';
+                    self._ttsOffsetMap = [];
+                    self._ttsCharOffset = 0;
+                    self._ttsStartPara = null;
+                    // A new page starts reading from its top
+                    try { frame.contentWindow.scrollTo(0, 0); } catch (e) {}
+                    self._pdfUpdateChrome();
+                });
+            });
+        },
+
+        _pdfGoToPage: function (n) {
+            if (!this._pdfDoc) return Promise.resolve();
+            return this._pdfRenderPage(n);
+        },
+
+        // First PDF page belonging to a reflow chapter, from the nav PageList
+        // (each entry maps a page number Title to its Chapter). null if the
+        // chapter has no mapped pages.
+        _pdfFirstPageOfChapter: function (nav, idx) {
+            var pl = (nav && (nav.PageList || nav.pageList)) || [];
+            var page = null;
+            for (var i = 0; i < pl.length; i++) {
+                var ch = pl[i].Chapter != null ? pl[i].Chapter : pl[i].chapter;
+                if (ch !== idx) continue;
+                var n = parseInt(pl[i].Title || pl[i].title, 10);
+                if (!isNaN(n) && (page === null || n < page)) page = n;
+            }
+            return page;
+        },
+
+        _pdfUpdateChrome: function () {
+            var self = this;
+            var pct = Math.round((self._pdfPage / Math.max(1, self._pdfNumPages)) * 100);
+            var info = document.getElementById('abr-page-info');
+            if (info) info.textContent = 'Page ' + self._pdfPage + ' of ' + self._pdfNumPages + ' · ' + pct + '%';
+            var fill = document.getElementById('abr-ribbon-fill');
+            if (fill) fill.style.height = pct + '%';
+            // The footer counter shows pages here, not reflow chapters —
+            // otherwise it sits on a stale "n / chapters" from the last mode
+            var chLabel = document.getElementById('abr-chapter-label');
+            if (chLabel) chLabel.textContent = self._pdfPage + ' / ' + self._pdfNumPages;
+            // Map the PDF page back to its reflow chapter so progress and
+            // bookmarks stay coherent across both modes
+            self._fetchNav().then(function (nav) {
+                var pl = nav.PageList || nav.pageList || [];
+                for (var i = 0; i < pl.length; i++) {
+                    if (String(pl[i].Title || pl[i].title) === String(self._pdfPage)) {
+                        var ch = pl[i].Chapter != null ? pl[i].Chapter : pl[i].chapter;
+                        if (typeof ch === 'number' && ch >= 0) self._chapterIndex = ch;
+                        break;
+                    }
                 }
-                self._showError('Could not open this book. Make sure it is an EPUB file.');
+                self._saveProgress(self._chapterIndex,
+                    self._pdfNumPages > 1 ? (self._pdfPage - 1) / (self._pdfNumPages - 1) : 0, null);
             });
         },
 
@@ -455,6 +680,12 @@ if (typeof window.a11yBookReader === 'undefined') {
             frame.setAttribute('title', bookName + ' — book content');
             frame.setAttribute('sandbox', 'allow-same-origin');
             frame.setAttribute('tabindex', '0');
+            // The frame is in the d-pad rover: once inside, ALL arrows act on
+            // the content, so tell the user how to get back out (Back/Escape)
+            frame.addEventListener('focus', function () {
+                var ci = document.getElementById('abr-chapter-info');
+                if (ci) ci.textContent = 'Book content. Arrows move through the book; press Back or Escape to return to the controls.';
+            });
             contentArea.appendChild(frame);
 
             // Reading ruler — tinted band over the reading line (pointer-events: none)
@@ -644,6 +875,26 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (self._ttsSaveTimer) { clearInterval(self._ttsSaveTimer); self._ttsSaveTimer = null; }
             self._clearTtsSelection(document.getElementById('abr-frame'));
 
+            // pdfview: a chapter jump renders that chapter's first PDF page.
+            // Loading reflow HTML here would silently swap the original layout
+            // for the text view while the mode select still says otherwise —
+            // every TOC/rotor/back path funnels through this reroute.
+            if (self._viewMode === 'pdfview' && self._pdfDoc) {
+                var wasContinuous = self._ttsContinuous;
+                var idx = Math.max(0, Math.min(index, (self._spine || []).length - 1));
+                self._chapterIndex = idx;
+                self._fetchNav().then(function (nav) {
+                    var page = self._pdfFirstPageOfChapter(nav, idx);
+                    if (page === null && self._spine.length > 1) {
+                        page = Math.round((idx / (self._spine.length - 1)) * (self._pdfNumPages - 1)) + 1;
+                    }
+                    return self._pdfRenderPage(page || 1);
+                }).then(function () {
+                    if (wasContinuous) { self._updateTtsButtons(true); self._startTts(); }
+                }).catch(function () {});
+                return;
+            }
+
             var spine = self._spine;
             if (!spine.length) return;
 
@@ -694,6 +945,8 @@ if (typeof window.a11yBookReader === 'undefined') {
             frame.style.visibility = 'hidden';
             if (self._revealTimer) clearTimeout(self._revealTimer);
             self._revealTimer = setTimeout(function () { frame.style.visibility = ''; }, 2500);
+            frame.removeAttribute('srcdoc');
+            frame.setAttribute('sandbox', 'allow-same-origin');
             frame.src = src;
 
             frame.onload = function () {
@@ -724,6 +977,7 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Page/viewport movement — used by swipe, tap zones, and keyboard
         // arrows. The Prev/Next buttons go through _navStep (the rotor).
         _turnByPage: function (delta) {
+            if (this._viewMode === 'pdfview') { this._navStep(delta); return; }
             // Deliberate navigation: Play now starts from where the user moved
             this._navResetTts();
             // Full-book scroll: Prev/Next steps by a viewport; the lazy loader
@@ -773,6 +1027,17 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Scroll→chapter. Read-aloud follows the new focus.
         _navStep: function (delta) {
             var wasPlaying = this._ttsPlaying || this._ttsContinuous;
+            if (this._viewMode === 'pdfview') {
+                var self = this;
+                this._navResetTts();
+                this._pdfGoToPage(this._pdfPage + delta).then(function () {
+                    if (!wasPlaying) return;
+                    self._ttsContinuous = true;
+                    self._updateTtsButtons(true);
+                    self._startTts();
+                });
+                return;
+            }
             var ch0 = this._chapterIndex;
             if (this._viewMode === 'page') this._navByPage(delta);
             else this._navByChapter(delta);            // chapter + scroll → by chapter
@@ -782,6 +1047,33 @@ if (typeof window.a11yBookReader === 'undefined') {
         // ⏪ / ⏩ : move by the ROTOR unit ("Navigate by"). Read-aloud follows.
         _audioSkip: function (delta) {
             var wasPlaying = this._ttsPlaying || this._ttsContinuous;
+            // Original layout routes here, not through _followAudio: the units
+            // below each manage their own TTS resume, and running BOTH resume
+            // mechanisms raced into double audio. Fine units (heading/paragraph/
+            // sentence) step by page — a fixed page has no reflow structure.
+            if (this._viewMode === 'pdfview') {
+                var selfP = this;
+                if (this._navUnit === 'chapter') {
+                    var t = this._chapterIndex + delta;
+                    if (t < 0 || t >= this._spine.length) return;
+                    this._navResetTts();
+                    // survives _loadChapter's silent-cancel; its pdfview
+                    // reroute restarts reading on the new chapter's page
+                    this._ttsContinuous = wasPlaying;
+                    this._loadChapter(t);
+                } else if (this._navUnit === 'bookmark') {
+                    this._navByBookmark(delta);
+                    if (wasPlaying) setTimeout(function () {
+                        if (selfP._ttsPlaying) return;
+                        selfP._ttsContinuous = true;
+                        selfP._updateTtsButtons(true);
+                        selfP._startTts();
+                    }, 900);
+                } else {
+                    this._navStep(delta);   // page step; resumes TTS itself
+                }
+                return;
+            }
             var ch0 = this._chapterIndex;
             var selfHandled = false;
             switch (this._navUnit) {
@@ -904,6 +1196,8 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Headings (h1–h6) or paragraph-level blocks, prev/next from the current
         // reading position. Past the chapter's elements → adjacent chapter.
         _navByElement: function (delta, kind) {
+            // pdfview has no reflow block structure — step by page instead
+            if (this._viewMode === 'pdfview') return this._navStep(delta);
             // Live spoken offset, captured BEFORE _navResetTts wipes TTS state, so
             // a step while reading aloud starts from where the VOICE is (not the
             // page top — that made it re-read the current paragraph).
@@ -980,13 +1274,27 @@ if (typeof window.a11yBookReader === 'undefined') {
                 : 'p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,figure,dt,dd';
             var els = Array.prototype.slice.call(root.querySelectorAll(sel));
             if (!els.length) return;
+            // Landing (below) parks the target at top=16 — the "current"
+            // threshold must cover that, or the just-landed element doesn't
+            // count as current and the next press re-picks it (stuck stepping).
             var cur = -1;
             for (var i = 0; i < els.length; i++) {
-                if (els[i].getBoundingClientRect().top <= 4) cur = i; else break;
+                if (els[i].getBoundingClientRect().top <= 20) cur = i; else break;
             }
             var target = cur + delta;
             if (target < 0 || target >= els.length) { this._scrollMaybeLoadEdges(frame, doc); return; }
             win.scrollTo(0, els[target].getBoundingClientRect().top + win.pageYOffset - 16);
+            // Sync the reading anchor: sentence skips and Play-from-here use
+            // it — leaving it behind made mixed paragraph/sentence stepping
+            // jump back to wherever the anchor last was.
+            try {
+                var built = this._buildOffsetMap(doc);
+                this._ttsOffsetMap = built.map;
+                this._ttsFullText = built.text;
+                for (var m = 0; m < built.map.length; m++) {
+                    if (els[target].contains(built.map[m].node)) { this._ttsCharOffset = built.map[m].absStart; break; }
+                }
+            } catch (e) {}
             this._updateProgressUI();
         },
 
@@ -999,6 +1307,8 @@ if (typeof window.a11yBookReader === 'undefined') {
         // it was". Works for every voice. Playing → moves and keeps reading from
         // the new sentence; stopped → repositions + highlights, stays silent.
         _navBySentence: function (delta) {
+            // pdfview reads page-at-a-time; sentence walking needs the reflow map
+            if (this._viewMode === 'pdfview') return this._navStep(delta);
             var frame = document.getElementById('abr-frame');
             if (!frame) return;
             var wasPlaying = this._ttsPlaying && !this._ttsPaused;
@@ -1204,6 +1514,7 @@ if (typeof window.a11yBookReader === 'undefined') {
 
             // Highlights & notes: selection popover + persistent highlight paint
             self._wireSelection(frame, doc);
+            self._wireFrameKeys(doc);
             self._paintAnnotations(frame);
 
             // Page view shows a clipped horizontal strip — the browser still
@@ -1378,7 +1689,13 @@ if (typeof window.a11yBookReader === 'undefined') {
             this._syncViewModeChoice();     // keep the Page-tab radios in sync
             this._updateNavStepLabels();    // Prev/Next announce page vs chapter
 
-            if (next === 'scroll') {
+            if (next === 'pdfview') {
+                this._enterPdfView(this._pdfPage || null, 0);
+            } else if (prev === 'pdfview') {
+                this._exitPdfView();
+                if (next === 'scroll') this._enterScrollMode(keepChapter, null, 0);
+                else this._loadChapter(keepChapter);
+            } else if (next === 'scroll') {
                 this._enterScrollMode(keepChapter, keepPara, keep);
             } else if (prev === 'scroll') {
                 this._exitScrollMode(keepChapter, keepPara, keep);
@@ -1387,7 +1704,9 @@ if (typeof window.a11yBookReader === 'undefined') {
             }
 
             var pageInfo = document.getElementById('abr-page-info');
-            if (pageInfo) pageInfo.setAttribute('aria-live', next === 'page' ? 'polite' : 'off');
+            // Page-turn readouts announce in the DISCRETE modes (page +
+            // original layout); scroll/chapter % churns and stays silent.
+            if (pageInfo) pageInfo.setAttribute('aria-live', (next === 'page' || next === 'pdfview') ? 'polite' : 'off');
         },
 
         _syncViewModeChoice: function () {
@@ -1502,7 +1821,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             // New section resident: paint any of its highlights/notes, and make
             // sure selection handlers exist on the stitched host document
             var fr = document.getElementById('abr-frame');
-            if (fr) { this._wireSelection(fr, doc); this._paintAnnotations(fr); }
+            if (fr) { this._wireSelection(fr, doc); this._wireFrameKeys(doc); this._paintAnnotations(fr); }
             return sec;
         },
 
@@ -1638,6 +1957,18 @@ if (typeof window.a11yBookReader === 'undefined') {
         _scrollGoToAnchor: function (chapterIndex, id) {
             var self = this;
             var doc = document.getElementById('abr-frame').contentDocument;
+            // Pin the in-flight target. Stitching a section ABOVE the viewport
+            // triggers the browser's scroll anchoring; its scroll event let the
+            // tracker snap _chapterIndex back to the viewport's chapter and the
+            // trimmer evict the just-loaded target — a tug-of-war that made
+            // distant BACKWARD jumps never arrive. While pinned, ticks are
+            // ignored and the target section is never trimmed.
+            self._scrollNavPending = chapterIndex;
+            var done = function () {
+                if (self._scrollNavPending === chapterIndex) self._scrollNavPending = null;
+                self._chapterIndex = chapterIndex;
+                self._updateProgressUI();
+            };
             var go = function () {
                 var sec = self._scrollSections[chapterIndex];
                 if (!sec) return false;
@@ -1660,10 +1991,17 @@ if (typeof window.a11yBookReader === 'undefined') {
                 }
                 return true;
             };
-            if (go()) return;
+            if (go()) { done(); return; }
             this._scrollQueueLoad(doc, chapterIndex);
             var tries = 0;
-            var iv = setInterval(function () { if (go() || ++tries > 20) clearInterval(iv); }, 100);
+            var iv = setInterval(function () {
+                if (go()) { clearInterval(iv); done(); return; }
+                if (++tries > 20) {
+                    clearInterval(iv);
+                    // Not arrived — unpin and let the next real scroll re-sync
+                    if (self._scrollNavPending === chapterIndex) self._scrollNavPending = null;
+                }
+            }, 100);
         },
 
         _wireScrollHandlers: function (frame, doc) {
@@ -1681,6 +2019,10 @@ if (typeof window.a11yBookReader === 'undefined') {
         },
 
         _onScrollTick: function (frame, doc) {
+            // A programmatic jump is in flight: this tick is transient (often
+            // scroll anchoring around a stitch) — don't snap the chapter back,
+            // save a throwaway position, or trim the target section away.
+            if (this._scrollNavPending != null) return;
             var info = this._scrollActiveInfo(doc);
             // Compute the section fraction once and reuse it for both the saved
             // progress and the progress UI — _updateProgressUI would otherwise
@@ -1741,6 +2083,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             var win = document.getElementById('abr-frame').contentWindow;
             var self = this;
             Object.keys(this._scrollSections).map(Number).forEach(function (idx) {
+                if (idx === self._scrollNavPending) return;   // jump target in flight
                 if (Math.abs(idx - self._chapterIndex) <= keep) return;
                 var sec = self._scrollSections[idx];
                 if (idx < self._chapterIndex) {
@@ -1858,6 +2201,18 @@ if (typeof window.a11yBookReader === 'undefined') {
                 var bookmap = document.getElementById('abr-bookmap');
                 if (bookmap && !bookmap.hasAttribute('hidden')) { this._toggleBookMap(); return; }
                 if (this._immersive) { this._setImmersive(false); return; }
+                // Focus inside the book content: Back exits to the controls,
+                // NOT out of the reader — the frame consumes all arrows, so
+                // this is the d-pad user's only way back to the chrome.
+                if (document.activeElement === document.getElementById('abr-frame')) {
+                    var exitBtn = document.getElementById('abr-tts-toggle') || document.getElementById('abr-settings-btn');
+                    if (exitBtn) {
+                        exitBtn.focus();
+                        var ciX = document.getElementById('abr-chapter-info');
+                        if (ciX) ciX.textContent = 'Reader controls';
+                        return;
+                    }
+                }
                 this._closeReader(); return;
             }
             // p = play/pause TTS
@@ -1885,7 +2240,11 @@ if (typeof window.a11yBookReader === 'undefined') {
                 if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
                     e.preventDefault(); this._turnByPage(-1); return;
                 }
-                if (this._viewMode === 'scroll' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                // Scroll, chapter, AND Original layout scroll vertically —
+                // chapter/pdfview used to fall through to the focus rover,
+                // which stole focus to the toolbar (and left the bottom of a
+                // tall PDF page unreachable without TTS).
+                if (this._viewMode !== 'page' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
                     e.preventDefault();
                     try {
                         frame.contentWindow.scrollBy({
@@ -1919,8 +2278,10 @@ if (typeof window.a11yBookReader === 'undefined') {
                 e.key === 'ArrowUp'   || e.key === 'ArrowDown') {
                 var active = document.activeElement;
                 e.preventDefault();
+                // The reading frame is part of the cycle: a remote must reach
+                // the CONTENT, not just the chrome (Back/Escape exits it).
                 var focusable = Array.from(
-                    overlay.querySelectorAll('button:not([disabled]), input, select')
+                    overlay.querySelectorAll('button:not([disabled]), input, select, iframe#abr-frame')
                 ).filter(function (el) {
                     return !el.hasAttribute('hidden') && !el.closest('[hidden]');
                 });
@@ -2404,8 +2765,13 @@ if (typeof window.a11yBookReader === 'undefined') {
                         st.id = 'abr-hl-style';
                         iframeDoc.head.appendChild(st);
                     }
-                    st.textContent = '::highlight(abr-tts){background-color:' + hlBg +
-                        ';color:' + hlFg + ';}';
+                    // In the PDF text layer the glyphs are TRANSPARENT over the
+                    // page image — forcing a text color would double-render the
+                    // word. Background-only there; semi-transparent so the
+                    // original glyphs stay readable through it.
+                    st.textContent = this._viewMode === 'pdfview'
+                        ? '::highlight(abr-tts){background-color:' + hlBg + '80;}'
+                        : '::highlight(abr-tts){background-color:' + hlBg + ';color:' + hlFg + ';}';
                     if (!this._cssHl) {
                         this._cssHl = new iframeWin.Highlight();
                         iframeWin.CSS.highlights.set('abr-tts', this._cssHl);
@@ -2422,6 +2788,8 @@ if (typeof window.a11yBookReader === 'undefined') {
                         var tp = Math.max(0, Math.min(this._pageCount - 1,
                             Math.floor(lx / this._pageStep)));
                         if (tp !== this._page) this._goToPage(tp);
+                    } else if (this._viewMode === 'pdfview') {
+                        this._followPdfScroll(iframeWin, rect);
                     } else {
                         this._followScroll(iframeWin, iframeDoc, entry.node);
                     }
@@ -2466,6 +2834,8 @@ if (typeof window.a11yBookReader === 'undefined') {
                     var targetPage = Math.max(0, Math.min(this._pageCount - 1,
                         Math.floor(layoutX / this._pageStep)));
                     if (targetPage !== this._page) this._goToPage(targetPage);
+                } else if (this._viewMode === 'pdfview') {
+                    this._followPdfScroll(iframeWin, rect);
                 } else {
                     this._followScroll(iframeWin, iframeDoc, entry.node);
                 }
@@ -2488,6 +2858,23 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Move the page only when the spoken text reaches a NEW paragraph — not
         // on every audio tick. Re-positioning mid-paragraph is what made the
         // view keep scrolling/jumping around the highlighted word.
+        // pdfview: the whole text layer is ONE block, so the paragraph-based
+        // _followScroll anchors once and never moves again. Follow the word
+        // range's own rect instead, keeping it in the upper-middle band.
+        _followPdfScroll: function (iframeWin, rect) {
+            var vh = iframeWin.innerHeight || 0;
+            if (!vh) return;
+            if (rect.top >= vh * 0.10 && rect.bottom <= vh * 0.80) return;   // already well placed
+            var cur = iframeWin.pageYOffset || 0;
+            var target = cur + rect.top - vh * 0.30;
+            if (target < 0) target = 0;
+            try {
+                iframeWin.scrollTo({ top: target, behavior: this._reducedMotion ? 'auto' : 'smooth' });
+            } catch (e) {
+                try { iframeWin.scrollTo(0, target); } catch (e2) {}
+            }
+        },
+
         _followScroll: function (iframeWin, iframeDoc, node) {
             var BLOCK = /^(P|DIV|H[1-6]|LI|TR|TD|TH|BLOCKQUOTE|SECTION|ARTICLE|HEADER|FOOTER|MAIN|NAV|ASIDE|FIGURE|FIGCAPTION|PRE)$/;
             var block = node && node.parentElement;
@@ -2740,7 +3127,10 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (!text.trim()) {
                 if (self._ttsContinuous) {
                     var next = self._chapterIndex + 1;
-                    if (next < self._spine.length) { self._ttsAdvanceChapter(next); }
+                    var more = self._viewMode === 'pdfview'
+                        ? self._pdfPage < self._pdfNumPages
+                        : next < self._spine.length;
+                    if (more) { self._ttsAdvanceChapter(next); }
                     else { self._ttsContinuous = false; self._updateTtsButtons(); }
                 }
                 return;
@@ -2813,7 +3203,10 @@ if (typeof window.a11yBookReader === 'undefined') {
                     self._clearTtsSelection(frame);
                     if (self._ttsContinuous) {
                         var nc = self._chapterIndex + 1;
-                        if (nc < self._spine.length) { self._ttsAdvanceChapter(nc); }
+                        var moreNc = self._viewMode === 'pdfview'
+                            ? self._pdfPage < self._pdfNumPages
+                            : nc < self._spine.length;
+                        if (moreNc) { self._ttsAdvanceChapter(nc); }
                         else {
                             self._ttsContinuous = false; self._ttsPlaying = false; self._updateTtsButtons();
                             var ei = document.getElementById('abr-chapter-info');
@@ -3116,6 +3509,8 @@ if (typeof window.a11yBookReader === 'undefined') {
         // so a 'scroll' reaching here is the new full-book mode.
         _normalizeViewMode: function (v) {
             if (v === 'page' || v === 'chapter' || v === 'scroll') return v;
+            // Original-layout mode exists only for PDFs; other books fall back
+            if (v === 'pdfview') return this._bookFormat === 'pdf' ? 'pdfview' : 'page';
             if (v === 'paged') return 'page';
             return 'chapter';
         },
@@ -3204,6 +3599,22 @@ if (typeof window.a11yBookReader === 'undefined') {
         // restarting TTS there once it's laid out.
         _ttsAdvanceChapter: function (next) {
             var self = this;
+            if (this._viewMode === 'pdfview') {
+                // Each PDF page is one TTS section; advance the page instead
+                if (this._pdfPage >= this._pdfNumPages) {
+                    this._ttsContinuous = false;
+                    this._updateTtsButtons();
+                    var pinfo = document.getElementById('abr-chapter-info');
+                    if (pinfo) pinfo.textContent = 'End of book';
+                    return;
+                }
+                this._pdfRenderPage(this._pdfPage + 1).then(function () {
+                    if (!self._ttsContinuous) return;
+                    self._updateTtsButtons(true);
+                    self._startTts();
+                });
+                return;
+            }
             if (this._viewMode === 'scroll') {
                 this._chapterIndex = next;
                 this._scrollGoToAnchor(next, null);
@@ -3243,6 +3654,16 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Jump to chapter+anchor; remembers where you came from
         _goToTarget: function (chapter, anchor, pushBack) {
             if (typeof chapter !== 'number' || chapter < 0 || chapter >= this._spine.length) return;
+            // pdfview: pg-N anchors land on that exact page; anything else
+            // lands on the chapter's first page (via _loadChapter's reroute).
+            // No back-stack push — locators snapshot the reflow layout.
+            if (this._viewMode === 'pdfview' && this._pdfDoc) {
+                this._navResetTts();
+                var pm = /^pg-(\d+)$/.exec(anchor || '');
+                if (pm) { this._pdfRenderPage(parseInt(pm[1], 10)); return; }
+                this._loadChapter(chapter);
+                return;
+            }
             this._navResetTts(); // Play now resumes from where you jump to
             if (pushBack) {
                 this._navStack.push(this._snapshotLocator());
@@ -3292,6 +3713,14 @@ if (typeof window.a11yBookReader === 'undefined') {
             this._updateBackBtn();
             if (!loc) return;
             this._navResetTts(); // Play resumes from the returned position
+            // pdfview: stack locators describe the reflow layout; land on the
+            // stored chapter's first page rather than loading reflow HTML.
+            if (this._viewMode === 'pdfview' && this._pdfDoc) {
+                this._loadChapter(loc.chapter);
+                var infoP = document.getElementById('abr-chapter-info');
+                if (infoP) infoP.textContent = 'Returning to your reading position';
+                return;
+            }
             if (this._viewMode === 'scroll') {
                 this._chapterIndex = loc.chapter;
                 this._scrollGoToAnchor(loc.chapter, null);
@@ -3384,14 +3813,28 @@ if (typeof window.a11yBookReader === 'undefined') {
                 b.tabIndex = t[0] === 'toc' ? 0 : -1;
                 b.textContent = t[1];
                 b.addEventListener('click', function () { self._renderBookMapTab(t[0]); });
-                // Left/Right (and TV d-pad) move between tabs per ARIA practice
+                // Left/Right move between tabs per ARIA practice. Down enters
+                // the panel — on a TV remote arrows are the ONLY way to move,
+                // so consuming Down for tab-cycling locked users out of the
+                // tab's content entirely. Up falls through to the global rover.
                 b.addEventListener('keydown', function (e) {
                     var i = defs.findIndex(function (d) { return d[0] === b.dataset.tab; });
                     var ni = -1;
-                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') ni = (i + 1) % defs.length;
-                    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ni = (i - 1 + defs.length) % defs.length;
+                    if (e.key === 'ArrowRight') ni = (i + 1) % defs.length;
+                    else if (e.key === 'ArrowLeft') ni = (i - 1 + defs.length) % defs.length;
                     else if (e.key === 'Home') ni = 0;
                     else if (e.key === 'End') ni = defs.length - 1;
+                    else if (e.key === 'ArrowDown') {
+                        var bodyEl = document.getElementById('abr-map-body');
+                        var firstCtl = bodyEl && bodyEl.querySelector(
+                            'button:not([disabled]), input, select, textarea');
+                        if (firstCtl) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            firstCtl.focus();
+                        }
+                        return; // empty panel: let the global rover handle it
+                    }
                     if (ni >= 0) {
                         e.preventDefault();
                         e.stopPropagation(); // don't let the global arrow handler also fire
@@ -3937,14 +4380,26 @@ if (typeof window.a11yBookReader === 'undefined') {
                 tab.tabIndex = i === 0 ? 0 : -1;
                 tab.textContent = t.label;
                 tab.addEventListener('click', function () { self._settingsTab(t.id); });
-                // Full APG tablist keys, same as the Book-Map tablist: arrows
-                // (both axes, for TV d-pad too) plus Home/End.
+                // Left/Right + Home/End move between tabs, same as the
+                // Book-Map tablist. Down enters the open panel (TV d-pad has
+                // no other way in); Up falls through to the global rover.
                 tab.addEventListener('keydown', function (e) {
                     var n = -1;
-                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') n = (i + 1) % TABS.length;
-                    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') n = (i - 1 + TABS.length) % TABS.length;
+                    if (e.key === 'ArrowRight') n = (i + 1) % TABS.length;
+                    else if (e.key === 'ArrowLeft') n = (i - 1 + TABS.length) % TABS.length;
                     else if (e.key === 'Home') n = 0;
                     else if (e.key === 'End') n = TABS.length - 1;
+                    else if (e.key === 'ArrowDown') {
+                        var openPanel = document.querySelector('#abr-settings .abr-tabpanel:not([hidden])');
+                        var firstCtl = openPanel && openPanel.querySelector(
+                            'button:not([disabled]), input, select, textarea');
+                        if (firstCtl) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            firstCtl.focus();
+                        }
+                        return; // empty panel: let the global rover handle it
+                    }
                     if (n < 0) return;
                     e.preventDefault();
                     e.stopPropagation(); // don't let the global arrow handler also fire
@@ -4062,7 +4517,9 @@ if (typeof window.a11yBookReader === 'undefined') {
             lab.className = 'abr-col-label';
             lab.textContent = 'View';
             row.appendChild(lab);
-            [['page', 'Page'], ['chapter', 'Chapter'], ['scroll', 'Scroll']].forEach(function (o) {
+            var modes = [['page', 'Page'], ['chapter', 'Chapter'], ['scroll', 'Scroll']];
+            if (self._bookFormat === 'pdf') modes.push(['pdfview', 'Original layout']);
+            modes.forEach(function (o) {
                 var b = document.createElement('button');
                 b.type = 'button';
                 b.className = 'abr-col-choice';
@@ -4535,8 +4992,10 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (existing) { self._deleteAnnotation(existing, null); return; }
 
             var ch = self._chapterIndex;
-            var fr = self._currentScrollFraction();
-            var pa = self._firstVisiblePara();
+            var fr = self._viewMode === 'pdfview'
+                ? (self._pdfNumPages > 1 ? (self._pdfPage - 1) / (self._pdfNumPages - 1) : 0)
+                : self._currentScrollFraction();
+            var pa = self._viewMode === 'pdfview' ? null : self._firstVisiblePara();
             // Quote context makes the bookmark robust to re-rendering and
             // readable in the Bookmarks list
             var text = null;
@@ -4631,6 +5090,28 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Jump to a stored locator — same restore mechanics as _goBack
         _goToLocator: function (loc) {
             this._navResetTts();
+            // pdfview: a locator made HERE stores a book-wide page fraction;
+            // one made in a reflow mode stores a chapter-internal fraction.
+            // Trust the fraction-derived page only when it falls inside the
+            // locator's chapter — otherwise land on the chapter's first page.
+            if (this._viewMode === 'pdfview' && this._pdfDoc) {
+                var self = this;
+                this._fetchNav().then(function (nav) {
+                    var cand = Math.round((loc.fraction || 0) * (self._pdfNumPages - 1)) + 1;
+                    var pl = (nav && (nav.PageList || nav.pageList)) || [];
+                    var candCh = null;
+                    for (var i = 0; i < pl.length; i++) {
+                        if (String(pl[i].Title || pl[i].title) === String(cand)) {
+                            candCh = pl[i].Chapter != null ? pl[i].Chapter : pl[i].chapter;
+                            break;
+                        }
+                    }
+                    if (candCh === loc.chapter || candCh === null) return self._pdfRenderPage(cand);
+                    var first = self._pdfFirstPageOfChapter(nav, loc.chapter);
+                    return self._pdfRenderPage(first || cand);
+                }).catch(function () {});
+                return;
+            }
             if (this._viewMode === 'scroll') {
                 this._chapterIndex = loc.chapter;
                 this._scrollGoToAnchor(loc.chapter, null);
@@ -4740,6 +5221,27 @@ if (typeof window.a11yBookReader === 'undefined') {
                     suffix: btext.slice(offs.end, offs.end + 40)
                 };
             } catch (e) { return null; }
+        },
+
+        // Reader keys pressed INSIDE the book document: keyboard focus lives
+        // in the iframe, so the parent document's handler never hears them.
+        // Forward the reader-level keys up (navigation, TTS, bookmark, and
+        // crucially Escape — the d-pad user's only way back to the chrome).
+        // Text inputs inside the book keep their own keys.
+        _wireFrameKeys: function (doc) {
+            var self = this;
+            if (!doc || doc.abrKeysWired) return;
+            doc.abrKeysWired = true;
+            var KEYS = ['Escape', 'GoBack', 'BrowserBack',
+                        'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+                        'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar',
+                        'p', 'P', 'b', 'B'];
+            doc.addEventListener('keydown', function (e) {
+                var t = e.target;
+                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+                if (KEYS.indexOf(e.key) === -1) return;
+                self._onKeyDown(e);
+            });
         },
 
         _wireSelection: function (frame, doc) {
@@ -5178,6 +5680,9 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Paged mode uses offsetLeft (layout geometry — immune to the
         // mid-animation transform); scroll mode uses viewport rects.
         _firstVisiblePara: function () {
+            // Original layout: text-layer spans aren't reflow blocks — a
+            // block index saved here would misplace the position in reflow
+            if (this._viewMode === 'pdfview') return null;
             if (this._viewMode === 'scroll') {
                 try {
                     var sdoc = document.getElementById('abr-frame').contentDocument;
@@ -5228,6 +5733,12 @@ if (typeof window.a11yBookReader === 'undefined') {
         },
 
         _currentScrollFraction: function () {
+            // Original layout: position is the PDF page, book-wide. The
+            // iframe's own scroll is just within-page overflow — saving it
+            // as progress corrupted resume/bookmark/back positions.
+            if (this._viewMode === 'pdfview') {
+                return this._pdfNumPages > 1 ? (this._pdfPage - 1) / (this._pdfNumPages - 1) : 0;
+            }
             // Paged mode: position is the page index, not a scroll offset
             if (this._viewMode === 'page') {
                 return this._pageCount > 1 ? this._page / (this._pageCount - 1) : 0;

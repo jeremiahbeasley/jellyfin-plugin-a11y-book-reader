@@ -9,6 +9,7 @@ const SUITES = [
   ['TTS', './tests/tts'],
   ['Multi-book', './tests/multibook'],
   ['Scroll-follow', './tests/scroll-follow'],
+  ['Navigation', './tests/navigation'],
   ['Annotations', './tests/annotations'],
   ['Formats', './tests/formats'],
 ];

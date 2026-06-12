@@ -20,11 +20,12 @@ public class BookReaderController : ControllerBase
     private readonly AnnotationService _annotations;
     private readonly TextFormatService _textFormats;
     private readonly DaisyFormatService _daisy;
+    private readonly PdfFormatService _pdf;
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
     private readonly ILogger<BookReaderController> _logger;
 
-    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, AnnotationService annotations, TextFormatService textFormats, DaisyFormatService daisy, ILibraryManager libraryManager, IUserManager userManager, ILogger<BookReaderController> logger)
+    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, AnnotationService annotations, TextFormatService textFormats, DaisyFormatService daisy, PdfFormatService pdf, ILibraryManager libraryManager, IUserManager userManager, ILogger<BookReaderController> logger)
     {
         _epub = epub;
         _piper = piper;
@@ -33,6 +34,7 @@ public class BookReaderController : ControllerBase
         _annotations = annotations;
         _textFormats = textFormats;
         _daisy = daisy;
+        _pdf = pdf;
         _libraryManager = libraryManager;
         _userManager = userManager;
         _logger = logger;
@@ -91,6 +93,40 @@ public class BookReaderController : ControllerBase
     [Produces("text/css")]
     public ActionResult GetStylesheet() => ServeEmbedded("Inject.a11y-book-reader.css", "text/css");
 
+    // PDF.js (Mozilla, Apache-2.0) for the original-layout PDF view
+    [HttpGet("pdfjs/pdf.min.mjs")]
+    [AllowAnonymous]
+    public ActionResult GetPdfJs() => ServeEmbedded("PdfJs.pdf.min.mjs", "text/javascript");
+
+    [HttpGet("pdfjs/pdf.worker.min.mjs")]
+    [AllowAnonymous]
+    public ActionResult GetPdfJsWorker() => ServeEmbedded("PdfJs.pdf.worker.min.mjs", "text/javascript");
+
+    /// <summary>Raw book file for the fidelity viewer (range requests for PDF.js chunked reads).</summary>
+    [HttpGet("file/{itemId}")]
+    public ActionResult GetBookFile(Guid itemId)
+    {
+        if (!CanAccessItem(itemId)) return NotFound();
+        var path = _libraryManager.GetItemById(itemId)?.Path;
+        if (path == null || !System.IO.File.Exists(path)) return NotFound();
+        if (!path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)) return NotFound();
+        return PhysicalFile(path, "application/pdf", enableRangeProcessing: true);
+    }
+
+    /// <summary>Format hint so the client can offer format-specific view modes.</summary>
+    [HttpGet("info/{itemId}")]
+    public ActionResult<object> GetBookInfo(Guid itemId)
+    {
+        if (!CanAccessItem(itemId)) return NotFound();
+        var path = _libraryManager.GetItemById(itemId)?.Path ?? string.Empty;
+        var format = path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ? "pdf"
+            : path.EndsWith(".epub", StringComparison.OrdinalIgnoreCase) ? "epub"
+            : TextFormatService.HandlesPath(path) ? "text"
+            : path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ? "daisy"
+            : "other";
+        return new { Format = format };
+    }
+
     // ── EPUB reading ──────────────────────────────────────────────────────────
 
     [HttpGet("spine/{itemId}")]
@@ -103,6 +139,7 @@ public class BookReaderController : ControllerBase
         // the EPUB surface
         var epub = _textFormats.Handles(itemId) ? _textFormats.GetParsed(itemId)
             : _daisy.Handles(itemId) ? _daisy.GetParsed(itemId)
+            : _pdf.Handles(itemId) ? _pdf.GetParsed(itemId)
             : _epub.GetParsed(itemId);
         if (epub == null) return NotFound();
         return epub.Spine.Select(s => (object)new { s.Index, s.Title, Href = s.ZipPath }).ToList();
@@ -119,6 +156,7 @@ public class BookReaderController : ControllerBase
         if (!CanAccessItem(itemId)) return NotFound();
         var html = _textFormats.Handles(itemId) ? _textFormats.GetChapterHtml(itemId, index, GetApiToken())
             : _daisy.Handles(itemId) ? _daisy.GetChapterHtml(itemId, index, GetApiToken())
+            : _pdf.Handles(itemId) ? _pdf.GetChapterHtml(itemId, index, GetApiToken())
             : _epub.GetChapterHtml(itemId, index, GetApiToken());
         if (html == null) return NotFound();
         return Content(html, "text/html");
@@ -131,6 +169,7 @@ public class BookReaderController : ControllerBase
         if (string.IsNullOrWhiteSpace(path)) return BadRequest();
         var (data, contentType) = _textFormats.Handles(itemId) ? _textFormats.GetResource(itemId, path)
             : _daisy.Handles(itemId) ? _daisy.GetResource(itemId, path)
+            : _pdf.Handles(itemId) ? _pdf.GetResource(itemId, path)
             : _epub.GetResource(itemId, path);
         if (data == null) return NotFound();
         return File(data, contentType);
@@ -146,6 +185,7 @@ public class BookReaderController : ControllerBase
         if (!CanAccessItem(itemId)) return NotFound();
         var nav = _textFormats.Handles(itemId) ? _textFormats.GetNavigation(itemId)
             : _daisy.Handles(itemId) ? _daisy.GetNavigation(itemId)
+            : _pdf.Handles(itemId) ? _pdf.GetNavigation(itemId)
             : _epub.GetNavigation(itemId);
         if (nav == null) return NotFound();
         return nav;
@@ -162,6 +202,7 @@ public class BookReaderController : ControllerBase
             return new SearchResults();
         return _textFormats.Handles(itemId) ? _textFormats.Search(itemId, q)
             : _daisy.Handles(itemId) ? _daisy.Search(itemId, q)
+            : _pdf.Handles(itemId) ? _pdf.Search(itemId, q)
             : _epub.Search(itemId, q);
     }
 
