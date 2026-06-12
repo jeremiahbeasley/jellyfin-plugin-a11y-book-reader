@@ -186,6 +186,23 @@ async function run() {
     const liveOn = await page.evaluate(() => document.getElementById('abr-page-info').getAttribute('aria-live'));
     log('pdfview: page readout announces (aria-live polite)', liveOn === 'polite', String(liveOn));
 
+    // Mode persistence: close the reader in Original layout, reopen — it
+    // must come back in Original layout (the open flow used to normalize
+    // the saved mode before the book format was known, demoting it to page)
+    await page.evaluate(() => window.a11yBookReader._setViewMode('pdfview'));
+    await pause(500);
+    await page.evaluate(() => document.getElementById('abr-close').click());
+    await pause(2000);
+    await H.openBookViaUI(page, H.cfg.books.pdf);
+    await pause(5000);
+    await page.evaluate(async () => {
+      const A = window.a11yBookReader;
+      for (let i = 0; i < 30; i++) { await new Promise(r => setTimeout(r, 1000)); if (A._pdfDoc || A._viewMode !== 'pdfview') break; }
+    });
+    await pause(1500);
+    s = await state();
+    log('pdfview persists across close/reopen', s.mode === 'pdfview' && s.painted === true, JSON.stringify(s));
+
     // ════ PART 2: PDF book, reflow page mode round-trip ════
     await setMode('page');
     s = await state();

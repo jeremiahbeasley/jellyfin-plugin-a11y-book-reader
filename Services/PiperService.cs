@@ -729,7 +729,12 @@ public class PiperService
         {
             using var doc = JsonDocument.Parse(File.ReadAllText(configPath));
             var root = doc.RootElement;
-            var quality = root.TryGetProperty("quality", out var q) ? q.GetString() ?? "medium" : "medium";
+            // Piper nests quality under "audio" in the voice config (the
+            // catalog has it top-level) — reading the root made every
+            // downloaded voice fall back to "medium" in the reader dropdown.
+            var quality = root.TryGetProperty("audio", out var audio) && audio.TryGetProperty("quality", out var q)
+                ? q.GetString() ?? "medium"
+                : (fallbackName.Contains('-') ? fallbackName[(fallbackName.LastIndexOf('-') + 1)..].Replace(".onnx", string.Empty) : "medium");
             var name = root.TryGetProperty("dataset", out var ds) ? ds.GetString() ?? fallbackName : fallbackName;
             string lang = "Unknown";
             if (root.TryGetProperty("language", out var langEl))

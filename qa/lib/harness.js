@@ -56,15 +56,20 @@ async function login(viewport) {
   return { browser, page, errs };
 }
 
-// Open a book the way a user does: detail page -> injected Read button -> reader.
-// Pass a fresh page (browser.newPage()) for clean per-book isolation; it shares
-// the authenticated localStorage with the login page.
+// Open a book the way a user does: detail page -> native Play button (the
+// plugin's Play takeover routes Book items into the reader). Pass a fresh
+// page (browser.newPage()) for clean per-book isolation; it shares the
+// authenticated localStorage with the login page.
 async function openBookViaUI(page, itemId) {
   await page.goto(cfg.baseUrl + '/web/#/details?id=' + itemId,
     { waitUntil: 'networkidle2', timeout: 45000 }).catch(() => {});
-  const btn = await page.waitForSelector('#abr-read-btn', { timeout: 25000, visible: true })
+  const btn = await page.waitForSelector('.itemDetailPage:not(.hide) .btnPlay', { timeout: 25000, visible: true })
     .catch(() => null);
   if (!btn) return { readButton: false, overlay: false };
+  // The interceptor decides from the prefetched detail context — wait for it
+  await page.waitForFunction(
+    () => window.a11yBookReader && window.a11yBookReader._detailBook,
+    { timeout: 15000 }).catch(() => {});
   await btn.click();
   const overlay = await page.waitForSelector('#abr-overlay', { timeout: 20000 })
     .then(() => true).catch(() => false);
@@ -77,13 +82,23 @@ async function openBookViaUI(page, itemId) {
 
 // Advance chapters until one has > minChars of text (skip cover/title pages).
 async function gotoTextChapter(page, minChars) {
+  // Judge chapters by the SERVER's chapter text (deterministic — the live
+  // frame lags loads and lies during them), then navigate with _goToTarget
+  // (scroll-safe; _loadChapter tears down the stitched scroll document) and
+  // wait for ARRIVAL.
   return await page.evaluate(async (min) => {
-    const R = window.a11yBookReader, n = R._spine.length;
+    const A = window.a11yBookReader, n = A._spine.length;
+    const token = ApiClient.accessToken();
     for (let i = 0; i < n; i++) {
-      await new Promise(res => { R._loadChapter(i); setTimeout(res, 800); });
-      const f = document.getElementById('abr-frame'); let t = '';
-      try { t = f.contentDocument.body.textContent.trim(); } catch (e) {}
-      if (t.length > min) return { chapter: i, chars: t.length };
+      const html = await (await fetch(ApiClient.getUrl(
+        'A11yBookReader/chapter/' + A._currentItemId + '/' + i, { api_key: token }))).text();
+      const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (text.length > min) {
+        A._goToTarget(i, null);
+        for (let t = 0; t < 12 && A._chapterIndex !== i; t++) await new Promise(r => setTimeout(r, 400));
+        await new Promise(r => setTimeout(r, 500));
+        return { chapter: i, chars: text.length };
+      }
     }
     return { chapter: -1, chars: 0 };
   }, minChars);

@@ -124,7 +124,9 @@ public class BookReaderController : ControllerBase
             : TextFormatService.HandlesPath(path) ? "text"
             : path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ? "daisy"
             : "other";
-        return new { Format = format };
+        // Supported drives the client's Play takeover: unsupported book-library
+        // items (audiobooks, comics, mobi) fall through to the native handler.
+        return new { Format = format, Supported = format != "other" };
     }
 
     // ── EPUB reading ──────────────────────────────────────────────────────────

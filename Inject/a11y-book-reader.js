@@ -50,8 +50,7 @@ if (typeof window.a11yBookReader === 'undefined') {
         _immersive: false,
         _enterAtEnd: false,      // entering a chapter backwards lands on its last page
         _reducedMotion: false,
-        _readButtonItem: null,   // the item id the read button was injected for
-        _readButton: null,       // reference to the injected button element
+        _detailBook: null,       // {id, name} when the current detail page is a Book
         _lastFocused: null,      // element to restore focus to on close
 
         // TTS state
@@ -87,6 +86,7 @@ if (typeof window.a11yBookReader === 'undefined') {
 
         init: function () {
             this._watchNavigation();
+            this._wirePlayTakeover();
             this._handleCurrentPage();
             // Trigger Chrome's async voice loading early; repopulate the select if open when they arrive
             if (typeof window.speechSynthesis !== 'undefined') {
@@ -134,70 +134,80 @@ if (typeof window.a11yBookReader === 'undefined') {
             var hash = window.location.hash || '';
             var isDetails = hash.includes('/details') || hash.includes('/item');
 
-            // Reset on non-detail pages so the button is re-injected when returning
             if (!isDetails) {
-                self._readButtonItem = null;
+                self._detailBook = null;
                 return;
             }
 
             var params = new URLSearchParams(hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : '');
             var itemId = params.get('id');
-            // Skip only if the button is already present in the DOM for this exact item
-            if (!itemId || (itemId === self._readButtonItem && document.getElementById('abr-read-btn'))) return;
+            if (!itemId || (self._detailBook && self._detailBook.id === itemId)) return;
 
             if (typeof ApiClient === 'undefined') return;
 
+            // Prefetch the item so the Play-takeover interceptor can decide
+            // SYNCHRONOUSLY when the native Play button is clicked. (The Play
+            // button carries no item id — the page context is the only source.)
+            self._detailBook = null;
             ApiClient.getItem(ApiClient.getCurrentUserId(), itemId)
                 .then(function (item) {
                     if (item.Type === 'Book') {
-                        self._injectReadButton(itemId, item.Name);
+                        self._detailBook = { id: itemId, name: item.Name };
                     }
                 })
                 .catch(function () {});
         },
 
-        // ── Read Button ──────────────────────────────────────────────────────
+        // ── Play takeover ────────────────────────────────────────────────────
+        // Books open in THIS reader through the native Play controls (detail
+        // page button + card hover play) — no injected second button. Items
+        // the reader can't handle (audiobooks, comics, mobi) pass through to
+        // the native handler via a marked re-click.
 
-        _injectReadButton: function (itemId, bookName) {
+        _wirePlayTakeover: function () {
             var self = this;
-            // Wait for action buttons area to appear
-            var tries = 0;
-            var poll = setInterval(function () {
-                tries++;
-                var container = document.querySelector('.itemDetailPage .itemButtons, .itemDetailPage .detailPagePrimaryButtons, .itemDetailPage .mainDetailButtons');
-                if (!container && tries < 20) return;
-                clearInterval(poll);
-                if (!container) return;
-
-                // Remove any previously injected button
-                var existing = document.getElementById('abr-read-btn');
-                if (existing) existing.remove();
-
-                var btn = document.createElement('button');
-                btn.id = 'abr-read-btn';
-                btn.type = 'button';
-                btn.className = 'raised emby-button abr-read-button';
-                btn.setAttribute('aria-label', 'Read ' + bookName);
-                btn.innerHTML = '<span class="material-icons abr-btn-icon" aria-hidden="true">menu_book</span> Read';
-
-                if (document.querySelector('.show-focus')) {
-                    btn.classList.add('show-focus');
+            document.addEventListener('click', function (e) {
+                if (self._playPassThrough) return;
+                if (document.getElementById('abr-overlay')) return; // already reading
+                var btn = e.target && e.target.closest && e.target.closest(
+                    '.btnPlay, .btnReplay, .cardOverlayButton[data-action="resume"], .cardOverlayButton[data-action="play"]');
+                if (!btn) return;
+                var id = null, name = '';
+                var card = btn.closest('.card');
+                if (card) {
+                    if (card.getAttribute('data-type') !== 'Book') return; // video/music untouched
+                    id = card.getAttribute('data-id');
+                    var t = card.querySelector('.cardText');
+                    name = t ? (t.textContent || '').trim() : '';
+                } else if (btn.classList.contains('btnPlay') || btn.classList.contains('btnReplay')) {
+                    if (!self._detailBook) return; // not a Book detail page
+                    id = self._detailBook.id;
+                    name = self._detailBook.name;
                 }
+                if (!id) return;
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                self._playIntercept(id, name, btn);
+            }, true);
+        },
 
-                btn.addEventListener('click', function () {
-                    self._openReader(itemId, bookName);
-                });
-                btn.addEventListener('keydown', function (e) {
-                    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
-                        e.preventDefault();
-                        self._openReader(itemId, bookName);
-                    }
-                });
-
-                container.appendChild(btn);
-                self._readButtonItem = itemId;
-                self._readButton = btn;
-            }, 200);
+        _playIntercept: function (itemId, name, origBtn) {
+            var self = this;
+            var giveBack = function () {
+                // Not a format this reader handles — replay the click for the
+                // native handler, marked so the interceptor lets it through
+                self._playPassThrough = true;
+                try { origBtn.click(); } catch (e) {}
+                setTimeout(function () { self._playPassThrough = false; }, 80);
+            };
+            ApiClient.ajax({
+                url: ApiClient.getUrl('A11yBookReader/info/' + itemId),
+                type: 'GET', dataType: 'json'
+            }).then(function (info) {
+                var supported = info && (info.Supported !== undefined ? info.Supported : info.supported);
+                if (supported === false) { giveBack(); return; }
+                self._openReader(itemId, name || 'Book');
+            }).catch(giveBack);
         },
 
         // ── Reader Open / Close ──────────────────────────────────────────────
@@ -220,18 +230,41 @@ if (typeof window.a11yBookReader === 'undefined') {
                 return self._bookFormat;
             }).catch(function () { self._bookFormat = 'other'; return 'other'; });
 
-            var readBtn = document.getElementById('abr-read-btn');
+            // Report a real playback session so the book lands on the resume
+            // rows (Continue Watching/Reading) like any other media. Position
+            // is the book fraction scaled to the item's runtime estimate.
+            self._playSessionId = 'abr' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+            self._runtimeTicks = null;
+            self._lastPlayReport = 0;
+            try {
+                ApiClient.getItem(ApiClient.getCurrentUserId(), itemId).then(function (it) {
+                    self._runtimeTicks = it.RunTimeTicks || null;
+                }).catch(function () {});
+                if (ApiClient.reportPlaybackStart) {
+                    ApiClient.reportPlaybackStart({
+                        ItemId: itemId, PlaySessionId: self._playSessionId,
+                        PlayMethod: 'DirectPlay', CanSeek: true, IsPaused: false, PositionTicks: 0
+                    });
+                }
+            } catch (e) {}
+
+            // Busy state on the native Play button while the reader loads.
+            // Attributes only — the web client owns that button's markup.
+            var readBtn = document.querySelector('.itemDetailPage:not(.hide) .btnPlay');
             if (readBtn) {
                 readBtn.disabled = true;
                 readBtn.setAttribute('aria-busy', 'true');
-                readBtn.setAttribute('aria-label', 'Opening ' + bookName + '…');
-                readBtn.innerHTML = '<span class="abr-btn-spinner" aria-hidden="true"></span><span> Opening…</span>';
             }
 
             // Settings load first so the reader opens already themed and in
             // the user's view mode (cross-device)
             self._fetchDisplaySettings().then(function () {
                 var ds = self._ds;
+                // _bookFormat may not be known yet (info fetch is in flight),
+                // so this normalize can demote a saved 'pdfview' to 'page'.
+                // Keep the RAW saved mode — the resume step re-derives from it
+                // once the format is in, or Original layout was never restored.
+                self._viewModeSaved = ds.ViewMode;
                 self._viewMode = self._normalizeViewMode(ds.ViewMode);
                 self._navUnit = self._normalizeNavUnit(ds.NavUnit);
                 self._rulerOn = !!ds.Ruler;
@@ -243,8 +276,6 @@ if (typeof window.a11yBookReader === 'undefined') {
                 if (readBtn) {
                     readBtn.disabled = false;
                     readBtn.removeAttribute('aria-busy');
-                    readBtn.setAttribute('aria-label', 'Read ' + bookName);
-                    readBtn.innerHTML = '<span class="material-icons abr-btn-icon" aria-hidden="true">menu_book</span> Read';
                 }
                 self._spine = spine;
                 self._chapterIndex = 0;
@@ -256,7 +287,9 @@ if (typeof window.a11yBookReader === 'undefined') {
                 // for PDFs and the renderer branches on it.
                 Promise.all([self._fetchProgress(itemId), self._infoPromise]).then(function (rr) {
                     var p = rr[0];
-                    self._viewMode = self._normalizeViewMode(self._viewMode);
+                    // Format is known now — normalize from the RAW saved mode,
+                    // not the possibly-demoted working value
+                    self._viewMode = self._normalizeViewMode(self._viewModeSaved || self._viewMode);
                     if (self._viewMode === 'pdfview') {
                         var loc0 = p && (p.Locations || p.locations);
                         var fr0 = loc0 && (typeof loc0.Progression === 'number' ? loc0.Progression : loc0.progression);
@@ -272,8 +305,6 @@ if (typeof window.a11yBookReader === 'undefined') {
                 if (readBtn) {
                     readBtn.disabled = false;
                     readBtn.removeAttribute('aria-busy');
-                    readBtn.setAttribute('aria-label', 'Read ' + bookName);
-                    readBtn.innerHTML = '<span class="material-icons abr-btn-icon" aria-hidden="true">menu_book</span> Read';
                 }
                 self._showError('Could not open this book.');
             });
@@ -513,6 +544,19 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (closePara === null) closePara = this._ttsStartPara;
             if (closePara === null || closePara === undefined) closePara = this._firstVisiblePara();
             this._saveProgress(this._chapterIndex, this._currentScrollFraction(), closePara);
+            // End the playback session at the final position — this is what
+            // pins the book (with progress) onto the resume rows
+            try {
+                if (this._playSessionId && ApiClient.reportPlaybackStopped) {
+                    ApiClient.reportPlaybackStopped({
+                        ItemId: this._currentItemId, PlaySessionId: this._playSessionId,
+                        PositionTicks: Math.round(
+                            this._bookFraction(this._chapterIndex, this._currentScrollFraction())
+                            * (this._runtimeTicks || 10000000))
+                    });
+                }
+            } catch (e) {}
+            this._playSessionId = null;
             if (this._ttsSaveTimer) { clearInterval(this._ttsSaveTimer); this._ttsSaveTimer = null; }
             if (this._scrollSaveTimer) { clearTimeout(this._scrollSaveTimer); this._scrollSaveTimer = null; }
             this._stopTts();
@@ -533,7 +577,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             el.setAttribute('role', 'alert');
             el.style.cssText = 'margin-top:8px;padding:8px 12px;border-radius:4px;background:rgba(220,53,69,.15);border:1px solid rgba(220,53,69,.5);color:#e05252;font-size:0.9em;';
             el.textContent = msg;
-            var btn = document.getElementById('abr-read-btn');
+            var btn = document.querySelector('.itemDetailPage:not(.hide) .btnPlay');
             if (btn && btn.parentNode) {
                 btn.parentNode.insertBefore(el, btn.nextSibling);
             } else {
@@ -1684,6 +1728,7 @@ if (typeof window.a11yBookReader === 'undefined') {
             var keep = this._currentScrollFraction();
 
             this._viewMode = next;
+            this._viewModeSaved = next;
             if (this._ds) { this._ds.ViewMode = next; this._saveDisplaySettings(); }
             this._announceViewMode(next);
             this._syncViewModeChoice();     // keep the Page-tab radios in sync
@@ -1838,6 +1883,10 @@ if (typeof window.a11yBookReader === 'undefined') {
             frame.removeAttribute('src');
             var doc = frame.contentDocument;
             doc.open();
+            // Scroll anchoring stays ON: it absorbs image-load growth in
+            // sections above the viewport (which our manual compensation
+            // can't see). It does NOT fight the stitcher's own compensation —
+            // that scrollTo sets an absolute target and always wins.
             doc.write('<!DOCTYPE html><html><head><meta charset="utf-8">' +
                 '<style id="abr-view-style"></style><style id="abr-host-style"></style>' +
                 '</head><body><div id="abr-scroll-root"></div></body></html>');
@@ -1914,7 +1963,12 @@ if (typeof window.a11yBookReader === 'undefined') {
             var active = null;
             for (var i = 0; i < sections.length; i++) {
                 var r = sections[i].getBoundingClientRect();
-                if (r.bottom > vh * 0.2) { active = sections[i]; break; }
+                // A section is active when it crosses the upper viewport band —
+                // but a SHORT section (cover, title page) can never reach 20%
+                // of the viewport, so for those the bar is "viewport top is
+                // inside it". Without this, tiny chapters were unreachable as
+                // positions: the tracker always reported their neighbour.
+                if (r.bottom > Math.min(vh * 0.2, Math.max(1, r.height - 1))) { active = sections[i]; break; }
             }
             if (!active) active = sections[sections.length - 1];
             var chapter = parseInt(active.getAttribute('data-ch'), 10);
@@ -1975,7 +2029,10 @@ if (typeof window.a11yBookReader === 'undefined') {
                 var el = id ? sec.querySelector('#' + (window.CSS && CSS.escape ? CSS.escape(id) : id)) : sec;
                 if (!el) return false;
                 var win = doc.defaultView;
-                var target = el.getBoundingClientRect().top + win.pageYOffset - 16;
+                // Land FLUSH on the target (no -16 breathing room): 16px above
+                // the section top is inside the PREVIOUS section, and the
+                // tracker then re-derives the wrong chapter at the boundary
+                var target = el.getBoundingClientRect().top + win.pageYOffset;
                 win.scrollTo(0, target);
                 // A target past the end of the loaded content gets CLAMPED to
                 // max-scroll: the viewport then sits inside the PREVIOUS section
@@ -2065,11 +2122,20 @@ if (typeof window.a11yBookReader === 'undefined') {
             var index = self._scrollQ.shift();
             if (!self._scrollSections || self._scrollSections[index]) { self._scrollPump(doc); return; }
             self._scrollBusy = true;
-            var win = document.getElementById('abr-frame').contentWindow;
-            var beforeH = doc.documentElement.scrollHeight, beforeY = win.pageYOffset;
-            var prepend = index < self._chapterIndex;
             self._fetchChapterParts(index).then(function (parts) {
                 if (!self._scrollSections) return; // exited scroll mode mid-flight
+                // The reader may have CLOSED while the fetch was in flight —
+                // re-resolve the frame instead of using a captured window
+                var frameEl = document.getElementById('abr-frame');
+                var win = frameEl && frameEl.contentWindow;
+                if (!win || !doc.documentElement) return;
+                // Measure SYNCHRONOUSLY with the stitch. Anything captured
+                // before the fetch goes stale the moment a trim (or another
+                // stitch) changes the document — the compensation below then
+                // scrolls by tens of thousands of pixels and strands the
+                // viewport at the top (the backward-jump-lands-wrong bug).
+                var beforeH = doc.documentElement.scrollHeight, beforeY = win.pageYOffset;
+                var prepend = index < self._chapterIndex;
                 self._stitchSection(doc, index, parts);
                 if (prepend) win.scrollTo(0, beforeY + (doc.documentElement.scrollHeight - beforeH));
             }).catch(function () {}).then(function () {
@@ -4865,8 +4931,34 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Save a Readium-style locator: structural fragment (Position), text
         // quote context, and progressions — so any future renderer or format
         // can resolve the spot.
+        // Book-wide reading fraction (0..1) for playback reporting
+        _bookFraction: function (chapter, fraction) {
+            if (this._viewMode === 'pdfview' && this._pdfNumPages > 1) {
+                return (this._pdfPage - 1) / (this._pdfNumPages - 1);
+            }
+            return Math.max(0, Math.min(1, (chapter + (fraction || 0)) / Math.max(1, this._spine.length)));
+        },
+
+        _reportPlayProgress: function (bookFraction) {
+            try {
+                if (!this._playSessionId || !ApiClient.reportPlaybackProgress) return;
+                ApiClient.reportPlaybackProgress({
+                    ItemId: this._currentItemId, PlaySessionId: this._playSessionId,
+                    PlayMethod: 'DirectPlay', CanSeek: true, IsPaused: false,
+                    PositionTicks: Math.round(bookFraction * (this._runtimeTicks || 10000000))
+                });
+            } catch (e) {}
+        },
+
         _saveProgress: function (chapter, fraction, para) {
             if (!this._currentItemId) return;
+            // Playback progress rides the same saves, throttled — this is
+            // what keeps the book current on the resume rows
+            var nowMs = Date.now();
+            if (!this._lastPlayReport || nowMs - this._lastPlayReport > 10000) {
+                this._lastPlayReport = nowMs;
+                this._reportPlayProgress(this._bookFraction(chapter, fraction));
+            }
             // When TTS is reading (or paused mid-read), the position that
             // matters is the SPOKEN paragraph, not the visual viewport top.
             var spoken = this._currentTtsBlock();

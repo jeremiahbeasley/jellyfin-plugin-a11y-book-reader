@@ -18,7 +18,13 @@ async function run() {
     const closePanel = async p => { await page.evaluate(id => { const x = document.querySelector('#' + id + ' .abr-panel-close'); if (x) x.click(); }, p); await new Promise(r => setTimeout(r, 500)); };
     await click('abr-settings-btn'); await click('abr-tab-page');
     await radio('page');
-    const paged = await st(() => ({ m: window.a11yBookReader._viewMode, t: (() => { try { return document.getElementById('abr-frame').contentDocument.body.textContent.trim().length > 50; } catch (e) { return false; } })() }));
+    // Wait for ARRIVAL — the mode switch reloads the chapter frame; a fixed
+    // delay races the load
+    const paged = await st(async () => {
+      const ok = () => { try { return document.getElementById('abr-frame').contentDocument.body.textContent.trim().length > 50; } catch (e) { return false; } };
+      for (let i = 0; i < 12 && !ok(); i++) await new Promise(r => setTimeout(r, 400));
+      return { m: window.a11yBookReader._viewMode, t: ok() };
+    });
     log('switch to page view keeps content', paged.m === 'page' && paged.t, JSON.stringify(paged));
     await radio('scroll');
     log('switch back to scroll', (await st(() => window.a11yBookReader._viewMode)) === 'scroll');
@@ -62,8 +68,15 @@ async function run() {
     await click('abr-bookmap-btn');
 
     // go-to + back — start from chapter 0 so the 50% target can never equal
-    // the starting chapter (a resumed mid-book position once made g1 === g0)
-    await st(async () => { window.a11yBookReader._loadChapter(0); await new Promise(r => setTimeout(r, 800)); });
+    // the starting chapter (a resumed mid-book position once made g1 === g0).
+    // _goToTarget, never _loadChapter: in scroll mode the latter tears down
+    // the stitched document while the scroll engine still points at it.
+    await st(async () => {
+      const A = window.a11yBookReader;
+      A._goToTarget(0, null);
+      for (let t = 0; t < 10 && A._chapterIndex !== 0; t++) await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 400));
+    });
     const g0 = await st(() => window.a11yBookReader._chapterIndex);
     await click('abr-bookmap-btn'); await click('abr-tab-goto');
     await st(() => { const inp = document.querySelector('#abr-bookmap input'); if (inp) { inp.value = '50%'; inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); } });
@@ -80,17 +93,36 @@ async function run() {
     await new Promise(r => setTimeout(r, 400));
     log('immersive hides chrome & Escape exits', imm.f && imm.s && (await st(() => !window.a11yBookReader._immersive)), JSON.stringify(imm));
 
-    // resume / persistence
-    await st(async () => { window.a11yBookReader._loadChapter(3); await new Promise(r => setTimeout(r, 800)); });
+    // resume / persistence — navigate with _goToTarget (scroll-safe) and
+    // save at a PROSE chapter: a near-zero-height section (image-only title
+    // page) sits under the tracker's active-section threshold, so resuming
+    // onto it legitimately reports the neighbouring chapter
+    const resumeTarget = 5;
+    await st(async c => {
+      const A = window.a11yBookReader;
+      A._goToTarget(c, null);
+      for (let t = 0; t < 10 && A._chapterIndex !== c; t++) await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 600));
+    }, resumeTarget);
     const saved = await st(() => window.a11yBookReader._chapterIndex);
-    await click('abr-close'); await new Promise(r => setTimeout(r, 1500));
+    // The close-time progress save is fire-and-forget — give it time to land
+    // on the server before the reopen reads it back
+    await click('abr-close'); await new Promise(r => setTimeout(r, 3000));
     await H.openBookViaUI(page, H.cfg.books.primary); await new Promise(r => setTimeout(r, 1500));
-    log('resume reopens at saved chapter', (await st(() => window.a11yBookReader && window.a11yBookReader._chapterIndex)) === saved, 'saved ' + saved);
+    const resumed = await st(async () => {
+      const A = window.a11yBookReader;
+      for (let t = 0; t < 10 && !A._chapterIndex; t++) await new Promise(r => setTimeout(r, 400));
+      return A._chapterIndex;
+    });
+    log('resume reopens at saved chapter', resumed === saved, 'saved ' + saved + ' resumed ' + resumed);
 
     // leave the book parked on a TEXT chapter — the saved position is the next
-    // session's starting state (one server-side user across all suites), and
-    // chapter 3 is the image-only title page (zero TTS text)
-    await st(async c => { window.a11yBookReader._loadChapter(c); await new Promise(r => setTimeout(r, 1000)); }, ch.chapter);
+    // session's starting state (one server-side user across all suites)
+    await st(async c => {
+      const A = window.a11yBookReader;
+      A._goToTarget(c, null);
+      for (let t = 0; t < 10 && A._chapterIndex !== c; t++) await new Promise(r => setTimeout(r, 400));
+    }, ch.chapter);
     await click('abr-close'); await new Promise(r => setTimeout(r, 1000));
 
     log('no reader JS errors', errs.length === 0, JSON.stringify(errs.slice(0, 3)));
