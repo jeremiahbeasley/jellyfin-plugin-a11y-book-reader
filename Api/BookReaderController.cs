@@ -21,11 +21,12 @@ public class BookReaderController : ControllerBase
     private readonly TextFormatService _textFormats;
     private readonly DaisyFormatService _daisy;
     private readonly PdfFormatService _pdf;
+    private readonly DocFormatService _doc;
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
     private readonly ILogger<BookReaderController> _logger;
 
-    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, AnnotationService annotations, TextFormatService textFormats, DaisyFormatService daisy, PdfFormatService pdf, ILibraryManager libraryManager, IUserManager userManager, ILogger<BookReaderController> logger)
+    public BookReaderController(EpubService epub, PiperService piper, ProgressService progress, SettingsService settings, AnnotationService annotations, TextFormatService textFormats, DaisyFormatService daisy, PdfFormatService pdf, DocFormatService doc, ILibraryManager libraryManager, IUserManager userManager, ILogger<BookReaderController> logger)
     {
         _epub = epub;
         _piper = piper;
@@ -35,6 +36,7 @@ public class BookReaderController : ControllerBase
         _textFormats = textFormats;
         _daisy = daisy;
         _pdf = pdf;
+        _doc = doc;
         _libraryManager = libraryManager;
         _userManager = userManager;
         _logger = logger;
@@ -123,6 +125,7 @@ public class BookReaderController : ControllerBase
             : path.EndsWith(".epub", StringComparison.OrdinalIgnoreCase) ? "epub"
             : TextFormatService.HandlesPath(path) ? "text"
             : path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ? "daisy"
+            : DocFormatService.HandlesPath(path) ? "doc"
             : "other";
         // Supported drives the client's Play takeover: unsupported book-library
         // items (audiobooks, comics, mobi) fall through to the native handler.
@@ -142,6 +145,7 @@ public class BookReaderController : ControllerBase
         var epub = _textFormats.Handles(itemId) ? _textFormats.GetParsed(itemId)
             : _daisy.Handles(itemId) ? _daisy.GetParsed(itemId)
             : _pdf.Handles(itemId) ? _pdf.GetParsed(itemId)
+            : _doc.Handles(itemId) ? _doc.GetParsed(itemId)
             : _epub.GetParsed(itemId);
         if (epub == null) return NotFound();
         return epub.Spine.Select(s => (object)new { s.Index, s.Title, Href = s.ZipPath }).ToList();
@@ -159,6 +163,7 @@ public class BookReaderController : ControllerBase
         var html = _textFormats.Handles(itemId) ? _textFormats.GetChapterHtml(itemId, index, GetApiToken())
             : _daisy.Handles(itemId) ? _daisy.GetChapterHtml(itemId, index, GetApiToken())
             : _pdf.Handles(itemId) ? _pdf.GetChapterHtml(itemId, index, GetApiToken())
+            : _doc.Handles(itemId) ? _doc.GetChapterHtml(itemId, index, GetApiToken())
             : _epub.GetChapterHtml(itemId, index, GetApiToken());
         if (html == null) return NotFound();
         return Content(html, "text/html");
@@ -172,6 +177,7 @@ public class BookReaderController : ControllerBase
         var (data, contentType) = _textFormats.Handles(itemId) ? _textFormats.GetResource(itemId, path)
             : _daisy.Handles(itemId) ? _daisy.GetResource(itemId, path)
             : _pdf.Handles(itemId) ? _pdf.GetResource(itemId, path)
+            : _doc.Handles(itemId) ? _doc.GetResource(itemId, path)
             : _epub.GetResource(itemId, path);
         if (data == null) return NotFound();
         return File(data, contentType);
@@ -188,6 +194,7 @@ public class BookReaderController : ControllerBase
         var nav = _textFormats.Handles(itemId) ? _textFormats.GetNavigation(itemId)
             : _daisy.Handles(itemId) ? _daisy.GetNavigation(itemId)
             : _pdf.Handles(itemId) ? _pdf.GetNavigation(itemId)
+            : _doc.Handles(itemId) ? _doc.GetNavigation(itemId)
             : _epub.GetNavigation(itemId);
         if (nav == null) return NotFound();
         return nav;
@@ -205,6 +212,7 @@ public class BookReaderController : ControllerBase
         return _textFormats.Handles(itemId) ? _textFormats.Search(itemId, q)
             : _daisy.Handles(itemId) ? _daisy.Search(itemId, q)
             : _pdf.Handles(itemId) ? _pdf.Search(itemId, q)
+            : _doc.Handles(itemId) ? _doc.Search(itemId, q)
             : _epub.Search(itemId, q);
     }
 

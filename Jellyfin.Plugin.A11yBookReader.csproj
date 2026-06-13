@@ -10,7 +10,7 @@
     <!-- Plugin folder must contain dependency DLLs (PdfPig); server-provided
          assemblies are excluded at deploy time, not here -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <Version>1.0.0.64</Version>
+    <Version>1.0.0.65</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,6 +19,7 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />
     <PackageReference Include="UglyToad.PdfPig.DocumentLayoutAnalysis" Version="1.7.0-custom-5" />
+    <PackageReference Include="RtfPipe" Version="2.0.7677.4303" />
   </ItemGroup>
 
   <ItemGroup>

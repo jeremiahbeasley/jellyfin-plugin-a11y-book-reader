@@ -35,10 +35,17 @@ async function run() {
         // view resumes at the SAVED position, which varies run to run
         const token = ApiClient.accessToken();
         const ch0 = await (await fetch(ApiClient.getUrl('A11yBookReader/chapter/' + itemId + '/0', { api_key: token }))).text();
+        // Concatenate every chapter so structural assertions catch tables and
+        // lists that live past chapter 0 (e.g. a Word table under heading 2).
+        let allHtml = '';
+        for (let i = 0; i < R2._spine.length; i++) {
+          allHtml += await (await fetch(ApiClient.getUrl('A11yBookReader/chapter/' + itemId + '/' + i, { api_key: token }))).text();
+        }
         const toc = nav.Toc || nav.toc || [];
         return {
           spine: R2._spine.length,
           ch0Html: ch0.slice(0, 30000),
+          allHtml: allHtml.slice(0, 120000),
           tocCount: toc.length,
           tocNested: toc.some(x => ((x.Children || x.children || []).length) > 0),
           pageList: (nav.PageList || nav.pageList || []).length,
@@ -83,6 +90,49 @@ async function run() {
     log('daisy3: NCX TOC nested + page list', d3.tocCount === 2 && d3.tocNested === true && d3.pageList === 2,
       JSON.stringify({ toc: d3.tocCount, nested: d3.tocNested, pages: d3.pageList }));
     log('daisy3: search works', d3.searchHits >= 1, 'hits ' + d3.searchHits);
+
+    // ── F1 document formats (fb2 / ODF text+presentation / OOXML / rtf / xml) ──
+    const fb2 = await openBook('Fiction Fb2 Meadow', 'meadowlark');
+    log('fb2: sections become chapters', fb2.spine === 2, JSON.stringify({ spine: fb2.spine, err: fb2.err }));
+    log('fb2: emphasis + blockquote render', /<em>|<strong>/.test(fb2.allHtml || '') && /<blockquote>/.test(fb2.allHtml || ''), '');
+    log('fb2: lang carried from metadata', /<html lang="en"/.test(fb2.allHtml || ''), '');
+    log('fb2: search works', fb2.searchHits >= 1, 'hits ' + fb2.searchHits);
+
+    const odt = await openBook('OpenDoc Text Garden', 'compost');
+    log('odt: headings become chapters', odt.spine === 2, JSON.stringify({ spine: odt.spine, err: odt.err }));
+    log('odt: accessible table (th scope) + list', /<th scope="col">/.test(odt.allHtml || '') && /<ul>/.test(odt.allHtml || ''), '');
+    log('odt: search works', odt.searchHits >= 1, 'hits ' + odt.searchHits);
+
+    const fodt = await openBook('OpenDoc Flat Orchard', 'compost');
+    log('fodt: flat ODF opens with chapters', fodt.spine === 2, JSON.stringify({ spine: fodt.spine, err: fodt.err }));
+    log('fodt: search works', fodt.searchHits >= 1, 'hits ' + fodt.searchHits);
+
+    const odp = await openBook('OpenDoc Slides Harvest', 'apples');
+    log('odp: slides become chapters', odp.spine === 2, JSON.stringify({ spine: odp.spine, err: odp.err }));
+    log('odp: slide titles are headings', /<h1>Slide /.test(odp.allHtml || ''), '');
+    log('odp: search works', odp.searchHits >= 1, 'hits ' + odp.searchHits);
+
+    const fodp = await openBook('OpenDoc FlatSlides Vine', 'apples');
+    log('fodp: flat presentation opens', fodp.spine === 2, JSON.stringify({ spine: fodp.spine, err: fodp.err }));
+    log('fodp: search works', fodp.searchHits >= 1, 'hits ' + fodp.searchHits);
+
+    const docx = await openBook('Word Modern Brook', 'trout');
+    log('docx: heading1 splits chapters', docx.spine === 2, JSON.stringify({ spine: docx.spine, err: docx.err }));
+    log('docx: accessible table (th scope) + list', /<th scope="col">/.test(docx.allHtml || '') && /<ul>/.test(docx.allHtml || ''), '');
+    log('docx: search works', docx.searchHits >= 1, 'hits ' + docx.searchHits);
+
+    const pptx = await openBook('PowerPoint Modern Cliff', 'sandstone');
+    log('pptx: slides become chapters', pptx.spine === 2, JSON.stringify({ spine: pptx.spine, err: pptx.err }));
+    log('pptx: slide titles are headings', /<h1>Slide /.test(pptx.allHtml || ''), '');
+    log('pptx: search works', pptx.searchHits >= 1, 'hits ' + pptx.searchHits);
+
+    const rtf = await openBook('Rich Text Dunes', 'marram');
+    log('rtf: opens as single chapter', rtf.spine === 1, JSON.stringify({ spine: rtf.spine, err: rtf.err }));
+    log('rtf: search works', rtf.searchHits >= 1, 'hits ' + rtf.searchHits);
+
+    const xml = await openBook('Plain Xml Catalog', 'saltspray');
+    log('xml: opens via text service', xml.spine === 1, JSON.stringify({ spine: xml.spine, err: xml.err }));
+    log('xml: search works', xml.searchHits >= 1, 'hits ' + xml.searchHits);
 
     log('no reader JS errors', errs.length === 0, JSON.stringify(errs.slice(0, 3)));
   } finally { await browser.close(); }

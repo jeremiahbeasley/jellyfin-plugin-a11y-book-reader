@@ -6,8 +6,10 @@ using MediaBrowser.Controller.Resolvers;
 namespace Jellyfin.Plugin.A11yBookReader;
 
 /// <summary>
-/// Lets book libraries index text formats the core BookResolver ignores
-/// (.txt, .md, .html). The reader serves them through TextFormatService.
+/// Lets book libraries index formats the core BookResolver ignores: plain
+/// text (.txt/.md/.html/.xml), documents (.fb2/.odt/.odp/.docx/.pptx/.rtf
+/// families) and text DAISY zips. The reader serves them through the
+/// matching format service.
 /// </summary>
 public class TextBookResolver : ItemResolver<Book>
 {
@@ -21,10 +23,11 @@ public class TextBookResolver : ItemResolver<Book>
         if (args.CollectionType != CollectionType.books) return null;
 
         var isText = Services.TextFormatService.HandlesPath(args.Path);
+        var isDoc = !isText && Services.DocFormatService.HandlesPath(args.Path);
         // .zip only when it actually sniffs as DAISY — generic zips (and
         // renamed comic archives) stay untouched
-        var isDaisy = !isText && Services.DaisyFormatService.SniffsAsDaisy(args.Path);
-        if (!isText && !isDaisy) return null;
+        var isDaisy = !isText && !isDoc && Services.DaisyFormatService.SniffsAsDaisy(args.Path);
+        if (!isText && !isDoc && !isDaisy) return null;
 
         return new Book
         {

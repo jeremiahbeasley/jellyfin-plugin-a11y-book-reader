@@ -14,7 +14,7 @@ namespace Jellyfin.Plugin.A11yBookReader.Services;
 /// </summary>
 public class TextFormatService
 {
-    private static readonly string[] Extensions = { ".txt", ".md", ".markdown", ".html", ".htm" };
+    private static readonly string[] Extensions = { ".txt", ".md", ".markdown", ".html", ".htm", ".xml" };
 
     // Chapters bigger than this get split at a paragraph boundary so huge
     // plain-text files stay navigable (and paged layout stays responsive).
@@ -169,6 +169,7 @@ public class TextFormatService
         {
             ".md" or ".markdown" => ParseMarkdown(raw, fallbackTitle),
             ".html" or ".htm" => ParseHtml(raw, fallbackTitle),
+            ".xml" => ParseXml(raw, fallbackTitle),
             _ => ParseTxt(raw, fallbackTitle),
         };
         if (chapters.Count == 0)
@@ -407,6 +408,97 @@ public class TextFormatService
             new() { Title = title, BodyHtml = body, PlainText = plain },
         };
     }
+
+    // ── Generic XML documents ────────────────────────────────────────────────
+    // Rendered as a readable hierarchy: element names become headings/labels,
+    // text content becomes paragraphs. Top-level children become chapters
+    // when the document is large enough to need navigation.
+
+    private static List<TextChapter> ParseXml(string raw, string fallbackTitle)
+    {
+        System.Xml.Linq.XDocument doc;
+        try { doc = System.Xml.Linq.XDocument.Parse(raw); }
+        catch
+        {
+            // Not well-formed: fall back to plain text so the file still opens
+            return ParseTxt(raw, fallbackTitle);
+        }
+
+        var root = doc.Root;
+        if (root == null) return ParseTxt(raw, fallbackTitle);
+
+        var topChildren = root.Elements().ToList();
+        var useChildrenAsChapters = topChildren.Count > 1 && raw.Length > MaxChapterChars;
+
+        var chapters = new List<TextChapter>();
+        if (useChildrenAsChapters)
+        {
+            var n = 0;
+            foreach (var child in topChildren)
+            {
+                n++;
+                var sb = new StringBuilder();
+                var plain = new StringBuilder();
+                XmlRender(child, sb, plain, 2);
+                chapters.Add(new TextChapter
+                {
+                    Title = Humanize(child.Name.LocalName) + " " + n,
+                    BodyHtml = "<h1>" + Escape(Humanize(child.Name.LocalName)) + "</h1>" + sb,
+                    PlainText = Regex.Replace(plain.ToString(), @"\s+", " ").Trim(),
+                });
+            }
+        }
+        else
+        {
+            var sb = new StringBuilder();
+            var plain = new StringBuilder();
+            XmlRender(root, sb, plain, 2);
+            chapters.Add(new TextChapter
+            {
+                Title = fallbackTitle,
+                BodyHtml = "<h1>" + Escape(Humanize(root.Name.LocalName)) + "</h1>" + sb,
+                PlainText = Regex.Replace(plain.ToString(), @"\s+", " ").Trim(),
+            });
+        }
+
+        return chapters;
+    }
+
+    private static void XmlRender(System.Xml.Linq.XElement el, StringBuilder sb, StringBuilder plain, int depth)
+    {
+        foreach (var node in el.Nodes())
+        {
+            if (node is System.Xml.Linq.XText t)
+            {
+                var text = Regex.Replace(t.Value, @"\s+", " ").Trim();
+                if (text.Length == 0) continue;
+                sb.Append("<p>").Append(Escape(text)).Append("</p>");
+                plain.Append(text).Append(' ');
+            }
+            else if (node is System.Xml.Linq.XElement child)
+            {
+                var hasElementChildren = child.Elements().Any();
+                var text = hasElementChildren ? null : Regex.Replace(child.Value, @"\s+", " ").Trim();
+                if (hasElementChildren)
+                {
+                    var lvl = Math.Min(6, depth);
+                    var name = Humanize(child.Name.LocalName);
+                    sb.Append("<h").Append(lvl).Append('>').Append(Escape(name)).Append("</h").Append(lvl).Append('>');
+                    plain.Append(name).Append(' ');
+                    XmlRender(child, sb, plain, depth + 1);
+                }
+                else if (!string.IsNullOrEmpty(text))
+                {
+                    var name = Humanize(child.Name.LocalName);
+                    sb.Append("<p><strong>").Append(Escape(name)).Append(":</strong> ").Append(Escape(text)).Append("</p>");
+                    plain.Append(name).Append(' ').Append(text).Append(' ');
+                }
+            }
+        }
+    }
+
+    private static string Humanize(string name) =>
+        Regex.Replace(Regex.Replace(name, "([a-z0-9])([A-Z])", "$1 $2"), "[_-]+", " ").Trim();
 
     private static string Escape(string s) =>
         s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
