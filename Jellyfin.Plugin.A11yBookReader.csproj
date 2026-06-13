@@ -10,7 +10,7 @@
     <!-- Plugin folder must contain dependency DLLs (PdfPig); server-provided
          assemblies are excluded at deploy time, not here -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <Version>1.0.0.65</Version>
+    <Version>1.0.0.66</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +20,21 @@
     <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />
     <PackageReference Include="UglyToad.PdfPig.DocumentLayoutAnalysis" Version="1.7.0-custom-5" />
     <PackageReference Include="RtfPipe" Version="2.0.7677.4303" />
+    <!-- Legacy binary Office (.doc/.ppt) converters, built from source and
+         vendored: the b2xtranslator nuget ships only Common, not the Doc/Ppt
+         mappers. Same self-built pattern as the custom PdfPig. -->
+    <Reference Include="b2xtranslator">
+      <HintPath>lib\b2xtranslator\b2xtranslator.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="b2xtranslator.doc">
+      <HintPath>lib\b2xtranslator\b2xtranslator.doc.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="b2xtranslator.ppt">
+      <HintPath>lib\b2xtranslator\b2xtranslator.ppt.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

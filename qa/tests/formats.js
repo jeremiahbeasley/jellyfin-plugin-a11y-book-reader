@@ -134,6 +134,16 @@ async function run() {
     log('xml: opens via text service', xml.spine === 1, JSON.stringify({ spine: xml.spine, err: xml.err }));
     log('xml: search works', xml.searchHits >= 1, 'hits ' + xml.searchHits);
 
+    // ── F2 legacy binary Office (.doc / .ppt via vendored b2xtranslator) ──
+    const doc = await openBook('Word Legacy Sample', 'underline');
+    log('doc: legacy Word opens (b2xtranslator → docx)', doc.spine >= 1, JSON.stringify({ spine: doc.spine, err: doc.err }));
+    log('doc: headings + list render', /<h[1-6]>/.test(doc.allHtml || '') && /<ul>/.test(doc.allHtml || ''), '');
+    log('doc: search works', doc.searchHits >= 1, 'hits ' + doc.searchHits);
+
+    const ppt = await openBook('PowerPoint Legacy Sample', 'box');
+    log('ppt: legacy PowerPoint opens (b2xtranslator → pptx)', ppt.spine >= 1, JSON.stringify({ spine: ppt.spine, err: ppt.err }));
+    log('ppt: slide text extracted + searchable', ppt.searchHits >= 1, 'hits ' + ppt.searchHits);
+
     log('no reader JS errors', errs.length === 0, JSON.stringify(errs.slice(0, 3)));
   } finally { await browser.close(); }
   return R;

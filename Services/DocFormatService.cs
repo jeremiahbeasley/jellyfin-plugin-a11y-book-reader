@@ -23,6 +23,7 @@ public class DocFormatService
     {
         ".fb2", ".odt", ".fodt", ".odp", ".fodp",
         ".docx", ".docm", ".pptx", ".pptm", ".rtf",
+        ".doc", ".ppt",
     };
 
     private const int MaxChapterChars = 24_000;
@@ -176,6 +177,8 @@ public class DocFormatService
             ".odp" or ".fodp" => ParseOdfPresentation(path, ext == ".fodp", fallbackTitle),
             ".docx" or ".docm" => ParseDocx(path, fallbackTitle),
             ".pptx" or ".pptm" => ParsePptx(path, fallbackTitle),
+            ".doc" => ParseDoc(path, fallbackTitle),
+            ".ppt" => ParsePpt(path, fallbackTitle),
             ".rtf" => ParseRtf(path, fallbackTitle),
             _ => new List<Section>(),
         };
@@ -636,7 +639,7 @@ public class DocFormatService
             {
                 var rid = sldId.Attributes().FirstOrDefault(a => a.Name.LocalName == "id" && a.Name.NamespaceName.Length > 0)?.Value;
                 if (rid != null && relMap.TryGetValue(rid, out var target))
-                    slidePaths.Add("ppt/" + target.TrimStart('/').Replace("../", string.Empty));
+                    slidePaths.Add(ResolvePartPath(target));
             }
         }
 
@@ -683,6 +686,61 @@ public class DocFormatService
         return sections;
     }
 
+    // ── Legacy binary Office (.doc / .ppt) ───────────────────────────────────
+    // No managed nuget ships the legacy parsers, so b2xtranslator (built from
+    // source, vendored under lib/) converts the binary OLE file to OOXML on
+    // disk, which the .docx/.pptx parsers above then read. The nested using on
+    // the package flushes it to the temp file before we parse it. Self-contained:
+    // the converter DLLs ship in the plugin folder.
+
+    private static List<Section> ParseDoc(string path, string fallbackTitle)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), "a11ydoc-" + Guid.NewGuid().ToString("N") + ".docx");
+        try
+        {
+            using (var reader = new b2xtranslator.StructuredStorage.Reader.StructuredStorageReader(path))
+            {
+                var doc = new b2xtranslator.DocFileFormat.WordDocument(reader);
+                var outType = b2xtranslator.WordprocessingMLMapping.Converter.DetectOutputType(doc);
+                tmp = b2xtranslator.WordprocessingMLMapping.Converter.GetConformFilename(tmp, outType);
+                using (var docx = b2xtranslator.OpenXmlLib.WordprocessingML.WordprocessingDocument.Create(tmp, outType))
+                {
+                    b2xtranslator.WordprocessingMLMapping.Converter.Convert(doc, docx);
+                }
+            }
+
+            return ParseDocx(tmp, fallbackTitle);
+        }
+        finally { TryDelete(tmp); }
+    }
+
+    private static List<Section> ParsePpt(string path, string fallbackTitle)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), "a11yppt-" + Guid.NewGuid().ToString("N") + ".pptx");
+        try
+        {
+            using (var reader = new b2xtranslator.StructuredStorage.Reader.StructuredStorageReader(path))
+            {
+                var ppt = new b2xtranslator.PptFileFormat.PowerpointDocument(reader);
+                var outType = b2xtranslator.PresentationMLMapping.Converter.DetectOutputType(ppt);
+                tmp = b2xtranslator.PresentationMLMapping.Converter.GetConformFilename(tmp, outType);
+                using (var pptx = b2xtranslator.OpenXmlLib.PresentationML.PresentationDocument.Create(tmp, outType))
+                {
+                    b2xtranslator.PresentationMLMapping.Converter.Convert(ppt, pptx);
+                }
+            }
+
+            return ParsePptx(tmp, fallbackTitle);
+        }
+        finally { TryDelete(tmp); }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch { /* temp cleanup is best-effort */ }
+    }
+
     // ── RTF ──────────────────────────────────────────────────────────────────
 
     private List<Section> ParseRtf(string path, string fallbackTitle)
@@ -706,6 +764,15 @@ public class DocFormatService
         }
 
         return new List<Section> { s };
+    }
+
+    // OOXML relationship targets may be absolute ("/ppt/slides/slide1.xml", as
+    // b2xtranslator emits) or relative to the part's folder ("slides/slide1.xml",
+    // as most authoring tools emit). Resolve both to a zip-entry path.
+    private static string ResolvePartPath(string target)
+    {
+        var t = target.Replace("../", string.Empty);
+        return t.StartsWith("/", StringComparison.Ordinal) ? t.Substring(1) : "ppt/" + t;
     }
 
     private static string Escape(string s) =>
