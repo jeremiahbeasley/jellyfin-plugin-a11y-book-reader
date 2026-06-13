@@ -18,5 +18,6 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<DaisyFormatService>();
         serviceCollection.AddSingleton<PdfFormatService>();
         serviceCollection.AddSingleton<DocFormatService>();
+        serviceCollection.AddSingleton<BrailleFormatService>();
     }
 }

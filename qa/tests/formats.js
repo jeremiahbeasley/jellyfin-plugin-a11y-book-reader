@@ -144,6 +144,48 @@ async function run() {
     log('ppt: legacy PowerPoint opens (b2xtranslator → pptx)', ppt.spine >= 1, JSON.stringify({ spine: ppt.spine, err: ppt.err }));
     log('ppt: slide text extracted + searchable', ppt.searchHits >= 1, 'hits ' + ppt.searchHits);
 
+    // ── F3 braille (.brf): Unicode braille display + liblouis back-translation for TTS ──
+    {
+      const bid = await findId('Braille Book');
+      if (!bid) {
+        log('braille: indexed', false, 'not indexed');
+      } else {
+        const bp = await browser.newPage();
+        await bp.setViewport({ width: 1280, height: 900 });
+        const br = await H.openBookViaUI(bp, bid);
+        if (!br.overlay) {
+          log('braille: opens', false, 'did not open');
+        } else {
+          await new Promise(res => setTimeout(res, 2500));
+          const bd = await bp.evaluate(async (itemId) => {
+            const R = window.a11yBookReader;
+            const spine = R._spine.length;
+            await R._ensureLiblouis();
+            const doc = document.getElementById('abr-frame').contentDocument;
+            const glyphs = (doc.body.innerHTML.match(/[⠀-⣿]/g) || []).length;
+            const nav = await ApiClient.ajax({ url: ApiClient.getUrl('A11yBookReader/nav/' + itemId), type: 'GET', dataType: 'json' }).catch(() => ({}));
+            const pageList = (nav.PageList || nav.pageList || []).length;
+            const tocPrint = (nav.Toc || nav.toc || []).map(n => R._brailleToPrint(n.Title || n.title || ''));
+            const built = R._buildOffsetMap(doc);
+            return {
+              spine, glyphs, pageList, tocPrint,
+              version: R._liblouis ? R._liblouis.ccall('lou_version', 'string', [], []) : null,
+              tts: built.text || '',
+              wholeNode: built.map.length ? !!built.map[0].wholeNode : false,
+            };
+          }, bid);
+          log('braille: single continuous document', bd.spine === 1, JSON.stringify({ spine: bd.spine }));
+          log('braille: renders Unicode braille glyphs', bd.glyphs > 20, 'glyphs ' + bd.glyphs);
+          log('braille: form-feed pages become a page list', bd.pageList === 2, 'pages ' + bd.pageList);
+          log('braille: liblouis 3.38 back-translator loads', bd.version === '3.38.0', 'v ' + bd.version);
+          log('braille: headings detected + back-translated', /chapter one/i.test((bd.tocPrint || []).join('|')) && /chapter two/i.test((bd.tocPrint || []).join('|')), JSON.stringify(bd.tocPrint));
+          log('braille: TTS reads ALL pages back-translated (not dots)', /chapter one/i.test(bd.tts) && /chapter two/i.test(bd.tts) && /garden grew/i.test(bd.tts), JSON.stringify({ tts: bd.tts.slice(0, 200) }));
+          log('braille: per-line highlight mapping', bd.wholeNode === true, '');
+        }
+        await bp.close();
+      }
+    }
+
     log('no reader JS errors', errs.length === 0, JSON.stringify(errs.slice(0, 3)));
   } finally { await browser.close(); }
   return R;

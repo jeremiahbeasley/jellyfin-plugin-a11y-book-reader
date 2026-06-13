@@ -10,7 +10,7 @@
     <!-- Plugin folder must contain dependency DLLs (PdfPig); server-provided
          assemblies are excluded at deploy time, not here -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <Version>1.0.0.66</Version>
+    <Version>1.0.0.67</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -46,6 +46,11 @@
     <EmbeddedResource Include="Fonts\OpenDyslexic-Italic.woff2" />
     <EmbeddedResource Include="PdfJs\pdf.min.mjs" />
     <EmbeddedResource Include="PdfJs\pdf.worker.min.mjs" />
+    <!-- liblouis 3.38.0 (LGPL-2.1) braille back-translator, compiled to WASM
+         with emscripten and bundled as a single self-contained file: the WASM
+         engine and the UEB table closure are embedded, so the reader loads one
+         asset and back-translates braille → print in-browser, no worker/XHR. -->
+    <EmbeddedResource Include="LibLouis\liblouis.js" />
   </ItemGroup>
 
 </Project>

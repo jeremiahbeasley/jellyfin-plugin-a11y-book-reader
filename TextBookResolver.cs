@@ -8,8 +8,8 @@ namespace Jellyfin.Plugin.A11yBookReader;
 /// <summary>
 /// Lets book libraries index formats the core BookResolver ignores: plain
 /// text (.txt/.md/.html/.xml), documents (.fb2/.odt/.odp/.docx/.pptx/.rtf
-/// families) and text DAISY zips. The reader serves them through the
-/// matching format service.
+/// families incl. legacy .doc/.ppt), braille (.brf/.brl) and text DAISY zips.
+/// The reader serves them through the matching format service.
 /// </summary>
 public class TextBookResolver : ItemResolver<Book>
 {
@@ -24,10 +24,11 @@ public class TextBookResolver : ItemResolver<Book>
 
         var isText = Services.TextFormatService.HandlesPath(args.Path);
         var isDoc = !isText && Services.DocFormatService.HandlesPath(args.Path);
+        var isBraille = !isText && !isDoc && Services.BrailleFormatService.HandlesPath(args.Path);
         // .zip only when it actually sniffs as DAISY — generic zips (and
         // renamed comic archives) stay untouched
-        var isDaisy = !isText && !isDoc && Services.DaisyFormatService.SniffsAsDaisy(args.Path);
-        if (!isText && !isDoc && !isDaisy) return null;
+        var isDaisy = !isText && !isDoc && !isBraille && Services.DaisyFormatService.SniffsAsDaisy(args.Path);
+        if (!isText && !isDoc && !isBraille && !isDaisy) return null;
 
         return new Book
         {

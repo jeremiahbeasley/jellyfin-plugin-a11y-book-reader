@@ -227,6 +227,8 @@ if (typeof window.a11yBookReader === 'undefined') {
                 type: 'GET', dataType: 'json'
             }).then(function (i) {
                 self._bookFormat = (i.Format || i.format || 'other');
+                // Preload the braille back-translator so TTS is ready instantly.
+                if (self._bookFormat === 'braille') self._ensureLiblouis().catch(function () {});
                 return self._bookFormat;
             }).catch(function () { self._bookFormat = 'other'; return 'other'; });
 
@@ -2556,6 +2558,15 @@ if (typeof window.a11yBookReader === 'undefined') {
 
         _startTts: function () {
             var self = this;
+            // Braille books: TTS must speak the back-translated PRINT, not the
+            // braille dot patterns. Defer the start until liblouis has loaded so
+            // _buildOffsetMap can back-translate. On failure, fall through (the
+            // map degrades to raw glyphs rather than blocking playback).
+            if (self._bookFormat === 'braille' && !self._liblouis) {
+                self._ensureLiblouis().then(function () { self._startTts(); },
+                    function () { self._liblouis = null; self._startTts(); });
+                return;
+            }
             // Fresh start (not a pause-resume or mid-read restart): begin at the
             // resumed paragraph if one is pending, else at the first VISIBLE
             // CHARACTER (handles partial paragraphs at a page top).
@@ -2736,6 +2747,51 @@ if (typeof window.a11yBookReader === 'undefined') {
         // Walk the iframe DOM, building text + a map of text-node char ranges.
         // Block elements contribute a '\n' separator so the speech engine pauses
         // naturally at paragraph breaks; offsets in the map match the text string.
+        // Loads the bundled liblouis (WASM + UEB tables, one file) once and
+        // resolves with the emscripten module. Used to speak braille as words.
+        _ensureLiblouis: function () {
+            var self = this;
+            if (self._liblouisPromise) return self._liblouisPromise;
+            self._liblouisPromise = new Promise(function (resolve, reject) {
+                if (window.createLiblouis) { window.createLiblouis().then(resolve, reject); return; }
+                var s = document.createElement('script');
+                s.src = ApiClient.getUrl('A11yBookReader/liblouis/liblouis.js');
+                s.onload = function () { window.createLiblouis().then(resolve, reject); };
+                s.onerror = function () { reject(new Error('liblouis load failed')); };
+                document.head.appendChild(s);
+            }).then(function (mod) { self._liblouis = mod; return mod; });
+            return self._liblouisPromise;
+        },
+
+        // Back-translate Unicode braille → print (UEB grade 2), cached per line.
+        // Buffer sizing is correct here: inlen in CHARS, output sized generously
+        // for contraction expansion.
+        _brailleToPrint: function (braille) {
+            var mod = this._liblouis;
+            if (!mod || !braille) return '';
+            if (!this._btCache) this._btCache = {};
+            if (Object.prototype.hasOwnProperty.call(this._btCache, braille)) return this._btCache[braille];
+            var tbl = 'unicode.dis,en-ueb-g2.ctb';
+            var inlen = braille.length;
+            var inPtr = mod._malloc((inlen + 1) * 2); mod.stringToUTF16(braille, inPtr, (inlen + 1) * 2);
+            var outCap = inlen * 8 + 128; var outPtr = mod._malloc(outCap * 2);
+            var inlenPtr = mod._malloc(4); mod.setValue(inlenPtr, inlen, 'i32');
+            var outlenPtr = mod._malloc(4); mod.setValue(outlenPtr, outCap, 'i32');
+            var out = '';
+            try {
+                var ok = mod.ccall('lou_backTranslateString', 'number',
+                    ['string', 'number', 'number', 'number', 'number', 'number', 'number', 'number'],
+                    [tbl, inPtr, inlenPtr, outPtr, outlenPtr, 0, 0, 0]);
+                if (ok) {
+                    var n = mod.getValue(outlenPtr, 'i32');
+                    for (var i = 0; i < n; i++) out += String.fromCharCode(mod.getValue(outPtr + i * 2, 'i16') & 0xFFFF);
+                }
+            } catch (e) { out = ''; }
+            mod._free(inPtr); mod._free(outPtr); mod._free(inlenPtr); mod._free(outlenPtr);
+            this._btCache[braille] = out;
+            return out;
+        },
+
         _buildOffsetMap: function (doc) {
             var map = [];
             var text = '';
@@ -2760,6 +2816,22 @@ if (typeof window.a11yBookReader === 'undefined') {
             if (this._viewMode === 'scroll' && doc) {
                 var info = this._scrollActiveInfo(doc);
                 if (info && info.section) root = info.section;
+            }
+            // Braille: speak the back-translated PRINT of each line. Each print
+            // line maps to its braille-line span (wholeNode) so the whole line
+            // highlights as it's read — print char offsets don't align with
+            // braille cells, so per-line is the right granularity.
+            if (this._bookFormat === 'braille' && this._liblouis && root && root.querySelector('.braille-line')) {
+                var blines = root.querySelectorAll('.braille-line');
+                for (var bi = 0; bi < blines.length; bi++) {
+                    var bnode = blines[bi].firstChild;
+                    if (!bnode) continue;
+                    var print = this._brailleToPrint(blines[bi].textContent).replace(/\s+$/, '');
+                    if (!print) continue;
+                    map.push({ node: bnode, absStart: text.length, absEnd: text.length + print.length, wholeNode: true });
+                    text += print + '\n';
+                }
+                if (text) return { text: text, map: map };
             }
             if (root) walk(root);
             return {text: text, map: map};
@@ -2808,8 +2880,16 @@ if (typeof window.a11yBookReader === 'undefined') {
                     entry = this._findMapEntry(offset);
                     if (!entry || !entry.node || !entry.node.isConnected) return;
                 }
-                var nodeOff = offset - entry.absStart;
-                var nodeEnd = Math.min(nodeOff + (length || 1), entry.node.textContent.length);
+                // Braille lines highlight whole (print offsets don't map to
+                // braille cells); everything else highlights the spoken word.
+                var nodeOff, nodeEnd;
+                if (entry.wholeNode) {
+                    nodeOff = 0;
+                    nodeEnd = entry.node.textContent.length;
+                } else {
+                    nodeOff = offset - entry.absStart;
+                    nodeEnd = Math.min(nodeOff + (length || 1), entry.node.textContent.length);
+                }
                 if (nodeEnd <= nodeOff) return;
 
                 var range = iframeDoc.createRange();
@@ -3929,6 +4009,12 @@ if (typeof window.a11yBookReader === 'undefined') {
             self._bookMapTab = tab;
             var body = document.getElementById('abr-map-body');
             if (!body || !self._nav) return;
+            // Braille TOC titles need back-translation; load liblouis once, then
+            // re-render so the entries show print instead of glyphs.
+            if (self._bookFormat === 'braille' && !self._liblouis && !self._brailleMapDeferred) {
+                self._brailleMapDeferred = true;
+                self._ensureLiblouis().then(function () { self._renderBookMapTab(tab); }, function () { });
+            }
             document.querySelectorAll('#abr-bookmap .abr-tab').forEach(function (b) {
                 var sel = b.dataset.tab === tab;
                 b.setAttribute('aria-selected', sel ? 'true' : 'false');
@@ -3960,6 +4046,10 @@ if (typeof window.a11yBookReader === 'undefined') {
             function renderTree(nodes, level) {
                 nodes.forEach(function (n) {
                     var title = n.Title || n.title || '';
+                    // Braille TOC titles arrive as glyphs; show the print.
+                    if (self._bookFormat === 'braille' && self._liblouis && /[⠀-⣿]/.test(title)) {
+                        title = self._brailleToPrint(title) || title;
+                    }
                     var ch = typeof n.Chapter === 'number' ? n.Chapter : n.chapter;
                     var an = n.Anchor || n.anchor || null;
                     if (title) body.appendChild(jumpBtn(title, ch, an, level));
