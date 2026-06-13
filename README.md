@@ -1,62 +1,111 @@
 # A11y Book Reader
 
-An accessible, in-browser book reader plugin for Jellyfin, built for WCAG 2.2 A/AA: full keyboard and TV-remote operability, screen-reader semantics with aria-live announcements, careful focus management, and offline text-to-speech. It opens a wide range of book and document formats through one consistent reading surface — so navigation, search, bookmarks, highlights, display settings, and TTS work the same no matter the file type.
+**Read any book or document in Jellyfin — comfortably, by keyboard, by remote, or by ear.**
+
+A11y Book Reader turns Jellyfin into a genuinely accessible reading app. Open a book and you get one consistent reading surface — the same navigation, search, bookmarks, highlights, display controls, and text-to-speech — no matter whether the file is an EPUB, a PDF, a Word document, a DAISY talking book, or a Braille file. It's built to WCAG 2.2 A/AA from the ground up, so it works for people who read with their eyes, their ears, a screen reader, or a TV remote.
+
+---
+
+## Why you'll want it
+
+- **Every book reads the same way.** Learn the controls once and they work across every supported format — no relearning per file type.
+- **Listen, don't just look.** Built-in neural text-to-speech reads aloud with the words highlighted as they're spoken, and picks up exactly where you left off — even on a different device.
+- **Read the way that's comfortable for you.** Your font (OpenDyslexic included), size, spacing, margins, colors, and theme — with a live contrast check so you know it's readable — and your choices follow you everywhere.
+- **Never lose your place.** Resume any book at the paragraph you stopped on, on any device, with a Continue Reading row right on the Jellyfin home screen.
+- **Works on the couch.** Fully operable with a TV remote's d-pad, not just a mouse or touchscreen.
+- **Nothing to install on the server.** One self-contained plugin — no system packages, no companion plugins.
+
+---
 
 ## Supported formats
 
-Every format below flows through the same reading surface (chapters, table of contents, full-text search, bookmarks, highlights, and TTS):
+Open a book and it just works. Chapters, table of contents, full-text search, bookmarks, highlights, and read-aloud are available for **every** format below:
 
-| Family | Formats | Notes |
-|--------|---------|-------|
-| EPUB | `.epub` | Full reflow, embedded nav/landmarks, images |
-| PDF | `.pdf` | Reflowed reading from the tagged/marked-content layer **and** a pixel-faithful Original-layout mode (PDF.js); page list + go-to-page |
-| DAISY | `.zip` (DAISY 2.02 & DAISY 3 / DTBook) | NCX/NCC table of contents, page list |
-| Plain text | `.txt`, `.md`, `.markdown`, `.html`, `.htm`, `.xml` | Headings detected into chapters; HTML sanitized |
-| Documents | `.fb2`, `.odt`, `.fodt`, `.odp`, `.fodp`, `.docx`, `.docm`, `.pptx`, `.pptm`, `.rtf` | Text views with accessible tables (`th scope`), lists, and heading structure; presentations become one chapter per slide |
-| Legacy Office | `.doc`, `.ppt` | Word/PowerPoint 97–2003, converted in-memory to OOXML (text views) |
+| You have… | Files | What you get |
+|-----------|-------|--------------|
+| **E-books** | `.epub` | Full reflow with the book's own navigation, landmarks, and images |
+| **PDFs** | `.pdf` | Reflowed, reads-aloud text from the document's tagged layer **plus** a pixel-faithful "original layout" view; jump to any page |
+| **Talking books** | DAISY 2.02 & DAISY 3 / DTBook (`.zip`) | The book's real chapter and page structure, preserved |
+| **Plain text & web** | `.txt`, `.md`, `.markdown`, `.html`, `.htm`, `.xml` | Headings become chapters automatically; HTML is sanitized for safe reading |
+| **Documents & slides** | `.fb2`, `.odt`, `.fodt`, `.odp`, `.fodp`, `.docx`, `.docm`, `.pptx`, `.pptm`, `.rtf` | Clean text with accessible tables, lists, and headings; each slide becomes a chapter |
+| **Legacy Office** | `.doc`, `.ppt` | Word/PowerPoint 97–2003, opened and read like any modern document |
+| **Braille** | `.brf`, `.brl` | Shown as real Braille cells with a one-tap switch to print; read aloud via accurate UEB back-translation |
 
-**Deliberately not supported:** comic archives (`.cbz/.cbr/.cb7/.cbt`) — image-only with no text layer, so nothing for TTS or Braille to read — and DRM-protected files, which open with a clear message rather than failing silently.
+**Not supported, on purpose:** comic archives (`.cbz/.cbr/.cb7/.cbt`) are images with no text to read aloud or translate to Braille, and DRM-locked files open with a clear explanation instead of failing silently.
+
+---
 
 ## Reading experience
 
-- **View modes** — paged and continuous-scroll for reflowable books, one-chapter-at-a-time, and Original-layout for PDFs; reader-owned arrow keys, plus tap zones, swipe, and on-screen buttons for every gesture.
-- **Text-to-speech** — server-side [Piper](https://github.com/rhasspy/piper) neural TTS, fully offline (voices download into the plugin's own folder), with streaming playback, synced word highlighting, and a browser/TV speech fallback.
-- **Navigation** — table of contents (synthesized from headings when a book lacks one), landmarks, print page list, go-to page/percent/chapter, in-book full-text search with context snippets and match counts, footnote popovers, and in-reader internal links with a back button.
-- **Annotations** — bookmarks with a ribbon progress indicator, text highlights, and notes (W3C Web Annotation model), all per-user.
-- **Display settings** — font picker including bundled OpenDyslexic (SIL OFL); size, line/letter/word/paragraph spacing, margins, and alignment; light/dark/sepia/high-contrast themes plus custom colors with a live WCAG contrast readout. Settings follow the user across devices.
-- **Per-user reading position** — resume any book where you left off, on any device (Readium-style locators); TTS resumes from the paragraph it was reading.
-- **Reading-time estimates** — each book reports an estimated reading time.
-- **Immersive mode** — distraction-free reading with an always-reachable exit; reading ruler; reduced motion honored (OS preference and in-app toggle).
+- **Choose how it flows** — paged or continuous-scroll for reflowable books, and a true original-layout mode for PDFs. Arrow keys, tap zones, swipe, and on-screen buttons all do the same thing.
+- **Find and jump anywhere** — table of contents (built automatically from headings when a book doesn't ship one), landmarks, a print page list, go-to page/percent/chapter, and full-text search with context snippets and match counts. Footnotes open in place; internal links have a back button.
+- **Mark it up** — bookmarks with a progress ribbon, text highlights, and notes, saved per user using the W3C Web Annotation model.
+- **Make it yours** — font, size, line/letter/word/paragraph spacing, margins, alignment; light/dark/sepia/high-contrast themes or your own colors with a live WCAG contrast readout. Settings sync across your devices.
+- **Stay in the flow** — distraction-free immersive mode with an always-reachable exit, a reading ruler, reduced-motion support, and an estimated reading time for every book.
+
+---
 
 ## Accessibility
 
-- WCAG 2.2 AA throughout — keyboard-first, TV-remote (d-pad) operable end to end, screen-reader semantics with live announcements, visible focus, no dimmed text.
-- Native **Play** on a book opens the accessible reader (with a Continue Reading resume row); unsupported items pass through to Jellyfin's native handling.
+This isn't accessibility bolted on — it's the point of the plugin.
 
-## Self-contained
+- **WCAG 2.2 AA throughout:** keyboard-first and TV-remote (d-pad) operable end to end, screen-reader semantics with live announcements, visible focus, and no dimmed/low-contrast text.
+- Pressing **Play** on a book opens the accessible reader and adds it to your Continue Reading row; items the reader can't open pass straight through to Jellyfin's normal handling.
 
-The plugin bundles everything it needs and depends on **no host-system packages**. Parser dependencies ship as managed DLLs alongside the plugin (PdfPig for PDF, RtfPipe for RTF, b2xtranslator for legacy `.doc`/`.ppt`), PDF.js and the reader UI are embedded web assets, and Piper voices download into the plugin's own folder at runtime. This keeps the plugin portable across any Jellyfin host.
-
-## Dependencies
-
-| Plugin | Why | Where |
-|--------|-----|-------|
-| **File Transformation** | Required — injects the reader UI into the Jellyfin web client. | https://github.com/IAmParadox27/jellyfin-plugin-file-transformation |
+---
 
 ## Install
 
-1. Install the [File Transformation](https://github.com/IAmParadox27/jellyfin-plugin-file-transformation) plugin.
-2. Extract the release into a `plugins/A11y Book Reader` folder — this includes `Jellyfin.Plugin.A11yBookReader.dll`, its bundled dependency DLLs (PdfPig, RtfPipe, b2xtranslator), the web assets, and `meta.json`.
-3. Restart Jellyfin.
+The plugin is **fully self-contained** — a single DLL with everything embedded. There's no companion plugin to install and nothing to add to the server itself.
 
-Piper TTS voices are downloaded on demand from the plugin's settings page into the plugin folder.
+### Option A — from the JB11 repository (recommended)
 
-## Build
+1. In Jellyfin, go to **Dashboard → Plugins → Repositories** and add:
+   `https://raw.githubusercontent.com/jeremiahbeasley/jb11-jellyfin-repository/main/manifest.json`
+2. Open **Catalog**, find **A11y Book Reader**, and click **Install**.
+3. **Restart Jellyfin.** Open any book and press Play.
+
+Updates then show up in the plugin catalog like any other plugin.
+
+### Option B — manual
+
+1. Download `A11yBookReader_<version>.zip` from the [latest release](https://github.com/jeremiahbeasley/jellyfin-plugin-a11y-book-reader/releases/latest).
+2. Extract it into a `plugins/A11y Book Reader` folder inside your Jellyfin data directory — it contains `Jellyfin.Plugin.A11yBookReader.dll` and `meta.json`.
+3. **Restart Jellyfin.**
+
+Requires Jellyfin **10.11.10** or newer.
+
+---
+
+## Setting up read-aloud (Piper text-to-speech)
+
+The reader speaks using [Piper](https://github.com/rhasspy/piper), a high-quality **neural** TTS engine that runs **entirely on your server** — no cloud, no account, no data leaving your network. Voices sound natural, and because synthesis happens server-side, even low-powered clients and TVs get great read-aloud with the words highlighted in time.
+
+**First-time setup takes about a minute:**
+
+1. Open the reader on any book, open **Settings → Voice** (or the plugin's configuration page in the Jellyfin dashboard).
+2. Pick a Piper voice and **download** it. Voices come in low/medium/high quality — *medium* is a great default; *high* sounds best on a capable server.
+3. That's it. The voice is saved into the plugin's own folder (`plugins/A11y Book Reader/piper-voices/`) and reused for every book. Download as many voices as you like and switch between them anytime.
+
+Notes:
+- **Downloaded once, used offline forever.** Voices are fetched on demand the first time you choose them; after that everything runs locally.
+- **No voice downloaded yet?** The reader automatically falls back to your browser's or TV's built-in speech so read-aloud still works out of the box.
+- Adjust **speed** from the reader; the word-highlighting stays in sync with the audio.
+
+---
+
+## Self-contained by design
+
+A11y Book Reader depends on **no host-system packages and no other plugins**. Everything it needs is inside the one DLL: the PDF, RTF, and legacy-Office parsers are merged in, the reader UI and PDF.js are embedded web assets, the Braille back-translator (liblouis) is compiled in, and the reader injects itself into the web client through its own middleware. The only thing fetched at runtime is the Piper voice you choose, which lands in the plugin's own folder. That keeps it portable across any Jellyfin host.
+
+---
+
+## Build from source
 
 ```
-dotnet publish --configuration Release --output bin -p:NuGetAudit=false
+dotnet build --configuration Release -p:DoMerge=true
 ```
 
-Targets .NET 9 / Jellyfin 10.11.x. The legacy-Office converters under `lib/b2xtranslator/` are built from source (the upstream nuget ships only the shared infrastructure, not the `.doc`/`.ppt` parsers) and vendored — see that folder's contents and the `Reference` entries in the csproj.
+Targets **.NET 9 / Jellyfin 10.11.x**. The `-p:DoMerge=true` switch merges the managed parser dependencies (PdfPig, RtfPipe, b2xtranslator) into the plugin DLL for a single self-contained artifact. The legacy-Office converters under `lib/b2xtranslator/` are built from source and vendored (the upstream NuGet ships only shared infrastructure, not the `.doc`/`.ppt` parsers).
 
 See `STANDARDS.md` for the standards this project follows (Readium locators, W3C Web Annotations, EPUB 3 nav, WCAG 2.2) and its deliberate deviations.

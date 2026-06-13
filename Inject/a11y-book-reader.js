@@ -227,8 +227,13 @@ if (typeof window.a11yBookReader === 'undefined') {
                 type: 'GET', dataType: 'json'
             }).then(function (i) {
                 self._bookFormat = (i.Format || i.format || 'other');
-                // Preload the braille back-translator so TTS is ready instantly.
-                if (self._bookFormat === 'braille') self._ensureLiblouis().catch(function () {});
+                // Preload the braille back-translator so TTS is ready instantly,
+                // and reveal the braille/print display toggle.
+                if (self._bookFormat === 'braille') {
+                    self._ensureLiblouis().catch(function () {});
+                    var bvb = document.getElementById('abr-braille-view-btn');
+                    if (bvb) bvb.removeAttribute('hidden');
+                }
                 return self._bookFormat;
             }).catch(function () { self._bookFormat = 'other'; return 'other'; });
 
@@ -677,6 +682,25 @@ if (typeof window.a11yBookReader === 'undefined') {
             bookmarkBtn.innerHTML = '<span class="material-icons" aria-hidden="true">bookmark_border</span>';
             bookmarkBtn.addEventListener('click', function () { self._toggleBookmark(); });
             toolbar.appendChild(bookmarkBtn);
+
+            // Braille books only: toggle the on-screen text between braille cells
+            // and the back-translated print. Revealed when a braille book opens.
+            var brailleViewBtn = document.createElement('button');
+            brailleViewBtn.id = 'abr-braille-view-btn';
+            brailleViewBtn.type = 'button';
+            brailleViewBtn.className = 'abr-icon-btn';
+            brailleViewBtn.setAttribute('aria-label', 'Show as print');
+            brailleViewBtn.setAttribute('aria-pressed', 'false');
+            brailleViewBtn.setAttribute('hidden', '');
+            // Braille shown by default → offer "Aa" (switch to print). In print
+            // view it becomes a six-dot braille cell ⠿ (switch back to braille).
+            brailleViewBtn.innerHTML = '<span class="abr-braille-sym" aria-hidden="true" style="font-size:18px;font-weight:700;line-height:1;">Aa</span>';
+            brailleViewBtn.addEventListener('click', function () { self._toggleBrailleView(); });
+            toolbar.appendChild(brailleViewBtn);
+            // The toolbar can build either before or after the format resolves;
+            // reveal here when it's already known braille, and the info-promise
+            // handler covers the case where the format resolves later.
+            if (self._bookFormat === 'braille') brailleViewBtn.removeAttribute('hidden');
 
             // Back: return to the position before the last jump/link
             var backBtn = document.createElement('button');
@@ -2499,6 +2523,26 @@ if (typeof window.a11yBookReader === 'undefined') {
             return 0;
         },
 
+        // Char offset of the first spoken text at or after an anchor element
+        // (e.g. a TOC heading), so Play starts exactly where the reader jumped.
+        _anchorCharOffset: function (anchor) {
+            try {
+                var doc = document.getElementById('abr-frame').contentDocument;
+                var el = anchor ? doc.getElementById(anchor) : null;
+                if (!el) return 0;
+                var map = this._ensureOffsetMap();
+                for (var i = 0; i < map.length; i++) {
+                    var n = map[i].node;
+                    if (!n) continue;
+                    if (el.contains(n) ||
+                        (el.compareDocumentPosition(n) & 4 /* DOCUMENT_POSITION_FOLLOWING */)) {
+                        return map[i].absStart;
+                    }
+                }
+            } catch (e) {}
+            return 0;
+        },
+
         // Block index containing the text being SPOKEN right now (live engine
         // offset, same per-engine capture the voice-change handler uses).
         _currentTtsBlock: function () {
@@ -2571,7 +2615,13 @@ if (typeof window.a11yBookReader === 'undefined') {
             // resumed paragraph if one is pending, else at the first VISIBLE
             // CHARACTER (handles partial paragraphs at a page top).
             if (!self._ttsPaused && self._ttsCharOffset === 0) {
-                if (self._ttsStartPara !== null && self._ttsStartPara !== undefined) {
+                if (self._ttsStartAnchor) {
+                    // Jumped to a heading/anchor (book map, link): start there,
+                    // not at the first visible line — the document may fit on
+                    // screen with no scroll, so "first visible" is the top.
+                    self._ttsCharOffset = self._anchorCharOffset(self._ttsStartAnchor);
+                    self._ttsStartAnchor = null;
+                } else if (self._ttsStartPara !== null && self._ttsStartPara !== undefined) {
                     self._ttsCharOffset = self._paraCharOffset(self._ttsStartPara);
                     self._ttsStartPara = null;
                 } else {
@@ -2792,6 +2842,52 @@ if (typeof window.a11yBookReader === 'undefined') {
             return out;
         },
 
+        // Swap the visible braille text between cells and back-translated print.
+        // data-braille keeps the cells; the offset map (TTS) always uses those,
+        // so audio is unaffected by which view is shown.
+        _toggleBrailleView: function () {
+            var self = this;
+            var toPrint = self._brailleView !== 'print';
+            function apply() {
+                var frame = document.getElementById('abr-frame');
+                var doc = frame && frame.contentDocument;
+                if (!doc) return;
+                var lines = doc.querySelectorAll('.braille-line');
+                for (var i = 0; i < lines.length; i++) {
+                    var braille = lines[i].getAttribute('data-braille') || '';
+                    lines[i].textContent = toPrint ? (self._brailleToPrint(braille) || braille) : braille;
+                }
+                if (doc.body) doc.body.classList.toggle('abr-braille-print', toPrint);
+                self._brailleView = toPrint ? 'print' : 'braille';
+                // The line text nodes were replaced. Rebuild the offset map
+                // against them — the back-translated text is identical (map uses
+                // data-braille), so the TTS position is preserved — then re-paint
+                // the current word so the highlight survives the toggle.
+                try {
+                    var built = self._buildOffsetMap(doc);
+                    self._ttsOffsetMap = built.map;
+                    self._ttsFullText = built.text;
+                    if (self._ttsPlaying && !self._ttsPaused) {
+                        var curOff = (self._piperLastAbs != null ? self._piperLastAbs
+                            : (self._hlTickLast != null ? self._hlTickLast
+                                : (self._ttsCharOffset || 0) + (self._ttsLastBoundary || 0)));
+                        self._highlightWord(frame, curOff, 1);
+                    }
+                } catch (e) {}
+                var btn = document.getElementById('abr-braille-view-btn');
+                if (btn) {
+                    btn.setAttribute('aria-pressed', toPrint ? 'true' : 'false');
+                    btn.setAttribute('aria-label', toPrint ? 'Show as braille' : 'Show as print');
+                    var sym = btn.querySelector('.abr-braille-sym');
+                    if (sym) sym.textContent = toPrint ? '⠿' : 'Aa';
+                }
+                var info = document.getElementById('abr-chapter-info');
+                if (info) info.textContent = toPrint ? 'Showing print' : 'Showing braille';
+            }
+            if (toPrint && !self._liblouis) { self._ensureLiblouis().then(apply, function () {}); }
+            else apply();
+        },
+
         _buildOffsetMap: function (doc) {
             var map = [];
             var text = '';
@@ -2826,7 +2922,8 @@ if (typeof window.a11yBookReader === 'undefined') {
                 for (var bi = 0; bi < blines.length; bi++) {
                     var bnode = blines[bi].firstChild;
                     if (!bnode) continue;
-                    var print = this._brailleToPrint(blines[bi].textContent).replace(/\s+$/, '');
+                    var braw = blines[bi].getAttribute('data-braille') || blines[bi].textContent;
+                    var print = this._brailleToPrint(braw).replace(/\s+$/, '');
                     if (!print) continue;
                     map.push({ node: bnode, absStart: text.length, absEnd: text.length + print.length, wholeNode: true });
                     text += print + '\n';
@@ -3811,6 +3908,8 @@ if (typeof window.a11yBookReader === 'undefined') {
                 return;
             }
             this._navResetTts(); // Play now resumes from where you jump to
+            this._ttsStartAnchor = anchor || null;
+            this._ttsCharOffset = 0;
             if (pushBack) {
                 this._navStack.push(this._snapshotLocator());
                 this._updateBackBtn();
@@ -3832,6 +3931,8 @@ if (typeof window.a11yBookReader === 'undefined') {
 
         _goToAnchor: function (anchor) {
             this._navResetTts(); // Play resumes from the link target
+            this._ttsStartAnchor = anchor || null;
+            this._ttsCharOffset = 0;
             if (this._viewMode === 'scroll') { this._scrollGoToAnchor(this._chapterIndex, anchor); return; }
             try {
                 var frame = document.getElementById('abr-frame');

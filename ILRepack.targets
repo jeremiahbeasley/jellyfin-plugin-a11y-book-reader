@@ -1,0 +1,8 @@
+<Project>
+  <!-- Presence of this file disables ILRepack.Lib.MSBuild.Task's default
+       "merge every output assembly" behavior (which would try to merge
+       Jellyfin's EF Core framework DLLs and fail on duplicate types).
+       The actual, correctly-scoped merge lives in MergeDependencies in the
+       csproj — it merges ONLY the third-party deps (PdfPig, RtfPipe,
+       b2xtranslator), never the host-provided framework assemblies. -->
+</Project>

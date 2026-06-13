@@ -10,7 +10,7 @@
     <!-- Plugin folder must contain dependency DLLs (PdfPig); server-provided
          assemblies are excluded at deploy time, not here -->
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
-    <Version>1.0.0.67</Version>
+    <Version>1.0.0.73</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +20,9 @@
     <PackageReference Include="UglyToad.PdfPig" Version="1.7.0-custom-5" />
     <PackageReference Include="UglyToad.PdfPig.DocumentLayoutAnalysis" Version="1.7.0-custom-5" />
     <PackageReference Include="RtfPipe" Version="2.0.7677.4303" />
+    <!-- Build-time only: merges the managed dependency DLLs into the plugin DLL
+         for the self-contained release (dotnet build -p:DoMerge=true). -->
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.45" PrivateAssets="all" />
     <!-- Legacy binary Office (.doc/.ppt) converters, built from source and
          vendored: the b2xtranslator nuget ships only Common, not the Doc/Ppt
          mappers. Same self-built pattern as the custom PdfPig. -->
@@ -52,5 +55,42 @@
          asset and back-translates braille → print in-browser, no worker/XHR. -->
     <EmbeddedResource Include="LibLouis\liblouis.js" />
   </ItemGroup>
+
+  <!-- Self-contained build: merge the managed third-party DLLs (PdfPig, RtfPipe,
+       b2xtranslator) INTO the plugin DLL so what we deploy, test, and ship is ONE
+       file (embedded assets — liblouis, PDF.js, fonts, reader UI — are already
+       inside it). Jellyfin/Microsoft/System assemblies are host-provided and
+       excluded. Runs on every Release build; the merged DLL replaces the output
+       and the now-redundant dependency DLLs are removed. -->
+  <Target Name="MergeDependencies" AfterTargets="Build" Condition="'$(Configuration)' == 'Release' And Exists('$(OutputPath)RtfPipe.dll')">
+    <PropertyGroup>
+      <MergeDir>$(MSBuildProjectDirectory)/$(OutputPath)</MergeDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <MergeDep Include="$(MergeDir)UglyToad.PdfPig.dll" />
+      <MergeDep Include="$(MergeDir)UglyToad.PdfPig.Core.dll" />
+      <MergeDep Include="$(MergeDir)UglyToad.PdfPig.Fonts.dll" />
+      <MergeDep Include="$(MergeDir)UglyToad.PdfPig.Tokenization.dll" />
+      <MergeDep Include="$(MergeDir)UglyToad.PdfPig.Tokens.dll" />
+      <MergeDep Include="$(MergeDir)UglyToad.PdfPig.DocumentLayoutAnalysis.dll" />
+      <MergeDep Include="$(MergeDir)RtfPipe.dll" />
+      <MergeDep Include="$(MergeDir)b2xtranslator.dll" />
+      <MergeDep Include="$(MergeDir)b2xtranslator.doc.dll" />
+      <MergeDep Include="$(MergeDir)b2xtranslator.ppt.dll" />
+      <MergeInput Include="$(MergeDir)$(AssemblyName).dll" />
+      <MergeInput Include="@(MergeDep)" />
+    </ItemGroup>
+    <ILRepack
+      Parallel="true"
+      Internalize="true"
+      InputAssemblies="@(MergeInput)"
+      TargetKind="Dll"
+      OutputFile="$(MergeDir)merged/$(AssemblyName).dll"
+      LibraryPath="$(MergeDir)" />
+    <!-- Replace the output with the merged single DLL and drop the merged-in deps -->
+    <Copy SourceFiles="$(MergeDir)merged/$(AssemblyName).dll" DestinationFiles="$(MergeDir)$(AssemblyName).dll" OverwriteReadOnlyFiles="true" />
+    <Delete Files="@(MergeDep)" />
+    <Message Importance="high" Text="Self-contained merge complete: $(AssemblyName).dll now contains PdfPig, RtfPipe, and b2xtranslator." />
+  </Target>
 
 </Project>

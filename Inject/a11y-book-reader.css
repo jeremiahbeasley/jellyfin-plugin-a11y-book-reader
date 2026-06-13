@@ -76,6 +76,11 @@
     background: rgba(127, 127, 127, 0.18);
 }
 
+/* display:flex above overrides the UA [hidden]{display:none}, so a hidden
+   icon button (e.g. the braille/print toggle, shown only for braille books)
+   would otherwise stay visible on every book. Restore hiding explicitly. */
+.abr-icon-btn[hidden] { display: none; }
+
 /* ─── Content iframe ─────────────────────────────────────────────────── */
 
 #abr-content-area {

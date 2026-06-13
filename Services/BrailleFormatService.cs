@@ -241,18 +241,21 @@ public class BrailleFormatService
                 var nextBlank = li == lines.Length - 1 || lines[li + 1].Trim().Length == 0;
                 var isHeading = contentLen >= 1 && contentLen <= 35 && (lead >= 4 || (prevBlank && nextBlank));
 
+                // data-braille keeps the cells so the reader can swap the visible
+                // text to back-translated print and back without losing them.
+                var eg = Escape(g);
                 if (isHeading)
                 {
                     hid++;
                     var id = "bh-" + hid;
-                    lhtml.Append("<span class=\"braille-line braille-heading\" id=\"").Append(id).Append("\">")
-                         .Append(Escape(g)).Append("</span>\n");
+                    lhtml.Append("<span class=\"braille-line braille-heading\" id=\"").Append(id)
+                         .Append("\" data-braille=\"").Append(eg).Append("\">").Append(eg).Append("</span>\n");
                     headings.Add(new BrailleHeading { Id = id, Glyphs = g.Trim('⠀', ' ', '\t') });
                 }
                 else
                 {
                     // The trailing \n stays outside the span to keep the grid.
-                    lhtml.Append("<span class=\"braille-line\">").Append(Escape(g)).Append("</span>\n");
+                    lhtml.Append("<span class=\"braille-line\" data-braille=\"").Append(eg).Append("\">").Append(eg).Append("</span>\n");
                 }
                 glyphs.Append(g).Append('\n');
             }
