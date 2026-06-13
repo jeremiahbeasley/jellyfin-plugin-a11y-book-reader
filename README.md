@@ -79,24 +79,26 @@ Requires Jellyfin **10.11.10** or newer.
 
 ## Setting up read-aloud (Piper text-to-speech)
 
-The reader speaks using [Piper](https://github.com/rhasspy/piper), a high-quality **neural** TTS engine that runs **entirely on your server** — no cloud, no account, no data leaving your network. Voices sound natural, and because synthesis happens server-side, even low-powered clients and TVs get great read-aloud with the words highlighted in time.
+The reader can speak using [Piper](https://github.com/rhasspy/piper), a high-quality **neural** TTS engine that runs **entirely on your server** — no cloud, no account, no data leaving your network. Because synthesis happens server-side, even low-powered clients and TVs get natural read-aloud with the words highlighted in time.
 
-**First-time setup takes about a minute:**
+Piper is set up **once, by an administrator**, from the plugin's configuration page — after that, every user can use it.
 
-1. Open the reader on any book, open **Settings → Voice** (or the plugin's configuration page in the Jellyfin dashboard).
-2. Pick a Piper voice and **download** it. Voices come in low/medium/high quality — *medium* is a great default; *high* sounds best on a capable server.
-3. That's it. The voice is saved into the plugin's own folder (`plugins/A11y Book Reader/piper-voices/`) and reused for every book. Download as many voices as you like and switch between them anytime.
+**Admin setup (Dashboard → Plugins → A11y Book Reader):**
 
-Notes:
-- **Downloaded once, used offline forever.** Voices are fetched on demand the first time you choose them; after that everything runs locally.
-- **No voice downloaded yet?** The reader automatically falls back to your browser's or TV's built-in speech so read-aloud still works out of the box.
-- Adjust **speed** from the reader; the word-highlighting stays in sync with the audio.
+1. Under **Piper TTS**, click **Download & Install Piper**. This downloads and installs the Piper engine onto the server (into the plugin's own folder — nothing is installed system-wide).
+2. Once Piper is installed, the **Voice Library** appears. Filter by language or name, preview voices with the sample button, and click **Download** on the voices you want. Voices come in low/medium/high quality — *medium* is a great default; *high* sounds best on a capable server. Download as many as you like.
+
+**Then, for everyone:**
+
+- In the reader, open the voice menu and pick any installed Piper voice — they appear alongside the browser's/TV's built-in voices. Adjust **speed** from the reader; the word-highlighting stays in sync with the audio.
+- **Fully offline once installed.** The engine and voices live in `plugins/A11y Book Reader/` and run locally from then on.
+- **Haven't installed Piper yet?** Read-aloud still works out of the box using the browser's or TV's built-in speech — Piper just makes it sound better.
 
 ---
 
 ## Self-contained by design
 
-A11y Book Reader depends on **no host-system packages and no other plugins**. Everything it needs is inside the one DLL: the PDF, RTF, and legacy-Office parsers are merged in, the reader UI and PDF.js are embedded web assets, the Braille back-translator (liblouis) is compiled in, and the reader injects itself into the web client through its own middleware. The only thing fetched at runtime is the Piper voice you choose, which lands in the plugin's own folder. That keeps it portable across any Jellyfin host.
+A11y Book Reader depends on **no host-system packages and no other plugins**. Everything it needs is inside the one DLL: the PDF, RTF, and legacy-Office parsers are merged in, the reader UI and PDF.js are embedded web assets, the Braille back-translator (liblouis) is compiled in, and the reader injects itself into the web client through its own middleware. The only things fetched after install are the Piper engine and the voices an administrator chooses on the config page, which land in the plugin's own folder. That keeps it portable across any Jellyfin host.
 
 ---
 
